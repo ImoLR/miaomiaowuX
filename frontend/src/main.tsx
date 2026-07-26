@@ -1,0 +1,662 @@
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { createRoot } from "react-dom/client";
+import {
+  BarChart3,
+  Boxes,
+  Gauge,
+  Home,
+  LogOut,
+  Menu,
+  Moon,
+  RefreshCw,
+  Server,
+  Settings,
+  Sun,
+  UserRound,
+  Users,
+} from "lucide-react";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import {
+  clearSession,
+  fetchAdminTraffic,
+  fetchNodeTotals,
+  fetchRemoteServers,
+  fetchTrafficSummary,
+  fetchUserConnections,
+  fetchUserSpeeds,
+  fetchUsers,
+  loadSession,
+  login,
+  saveSession,
+} from "./api";
+import { formatBytes, formatDurationSince, formatGB, formatSpeed, todayUTC } from "./format";
+import type {
+  AdminTrafficResponse,
+  NodeTrafficItem,
+  RealtimeSnapshot,
+  RemoteServer,
+  Session,
+  TrafficSummary,
+  UserTrafficSummary,
+} from "./types";
+import "./styles.css";
+
+type DashboardState = {
+  summary: TrafficSummary | null;
+  servers: RemoteServer[];
+  nodes: NodeTrafficItem[];
+  users: UserTrafficSummary[];
+  userConnections: Record<string, number>;
+  userSpeeds: Record<string, number>;
+  adminTraffic: AdminTrafficResponse | null;
+};
+
+const emptyState: DashboardState = {
+  summary: null,
+  servers: [],
+  nodes: [],
+  users: [],
+  userConnections: {},
+  userSpeeds: {},
+  adminTraffic: null,
+};
+
+function App() {
+  const [session, setSession] = useState<Session | null>(() => loadSession());
+  const [dark, setDark] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  }, [dark]);
+
+  if (!session) {
+    return <LoginScreen onLogin={setSession} dark={dark} onToggleTheme={() => setDark((value) => !value)} />;
+  }
+
+  return (
+    <Dashboard
+      session={session}
+      dark={dark}
+      onToggleTheme={() => setDark((value) => !value)}
+      onLogout={() => {
+        clearSession();
+        setSession(null);
+      }}
+    />
+  );
+}
+
+function LoginScreen({
+  onLogin,
+  dark,
+  onToggleTheme,
+}: {
+  onLogin: (session: Session) => void;
+  dark: boolean;
+  onToggleTheme: () => void;
+}) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [rememberMe, setRememberMe] = useState(true);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      const response = await login(username, password, rememberMe);
+      if (response.requires_2fa) {
+        setError("当前账号启用了二步验证，第一阶段新版前端暂未接入 2FA。");
+        return;
+      }
+      onLogin(saveSession(response));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "登录失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main className="login-page">
+      <div className="login-actions">
+        <button className="round-button" type="button" onClick={onToggleTheme} aria-label="切换主题">
+          {dark ? <Sun /> : <Moon />}
+        </button>
+      </div>
+      <form className="login-card" onSubmit={submit}>
+        <div className="brand-mark">妙</div>
+        <h1>妙妙屋 X</h1>
+        <p>欢迎回来</p>
+
+        <label>
+          <span>用户名</span>
+          <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="用户名" autoComplete="username" />
+        </label>
+
+        <label>
+          <span>密码</span>
+          <input
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder="密码"
+            type="password"
+            autoComplete="current-password"
+          />
+        </label>
+
+        <label className="remember">
+          <input checked={rememberMe} onChange={(event) => setRememberMe(event.target.checked)} type="checkbox" />
+          <span>记住我</span>
+        </label>
+
+        {error && <div className="error-text">{error}</div>}
+
+        <button className="primary-button" disabled={loading} type="submit">
+          {loading ? "登录中..." : "登录"}
+        </button>
+      </form>
+    </main>
+  );
+}
+
+function Dashboard({
+  session,
+  dark,
+  onToggleTheme,
+  onLogout,
+}: {
+  session: Session;
+  dark: boolean;
+  onToggleTheme: () => void;
+  onLogout: () => void;
+}) {
+  const [state, setState] = useState<DashboardState>(emptyState);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [activeTab, setActiveTab] = useState("overview");
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  const refreshUserSpeeds = useCallback(
+    async (servers: RemoteServer[]) => {
+      if (servers.length === 0) {
+        setState((current) => ({ ...current, userSpeeds: {} }));
+        return;
+      }
+
+      const results = await Promise.allSettled(servers.map((server) => fetchUserSpeeds(session.token, server.id)));
+      const userSpeeds = aggregateUserSpeeds(results);
+      setState((current) => ({ ...current, userSpeeds }));
+    },
+    [session.token],
+  );
+
+  const loadDashboard = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const date = todayUTC();
+      const [summary, remoteServers, nodeTotals, users, connections, adminTraffic] = await Promise.all([
+        fetchTrafficSummary(session.token),
+        fetchRemoteServers(session.token),
+        fetchNodeTotals(session.token, date),
+        fetchUsers(session.token),
+        fetchUserConnections(session.token),
+        fetchAdminTraffic(session.token),
+      ]);
+
+      const servers = remoteServers.servers ?? [];
+      const speedResults = await Promise.allSettled(servers.map((server) => fetchUserSpeeds(session.token, server.id)));
+
+      setState({
+        summary,
+        servers,
+        nodes: nodeTotals.items ?? [],
+        users: users.users ?? [],
+        userConnections: connections.connections ?? {},
+        userSpeeds: aggregateUserSpeeds(speedResults),
+        adminTraffic,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Dashboard 加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [session.token]);
+
+  useEffect(() => {
+    void loadDashboard();
+  }, [loadDashboard]);
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: number | undefined;
+    let stopped = false;
+
+    function clearReconnectTimer() {
+      if (reconnectTimer !== undefined) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+    }
+
+    function applySnapshot(event: MessageEvent) {
+      try {
+        const snapshot = JSON.parse(event.data as string) as RealtimeSnapshot;
+        if (snapshot.type !== "realtime") return;
+        if (snapshot.servers) void refreshUserSpeeds(snapshot.servers);
+        setState((current) => ({
+          ...current,
+          servers: snapshot.servers ?? current.servers,
+          summary: snapshot.trafficSummary ?? current.summary,
+          adminTraffic: snapshot.adminTraffic ?? current.adminTraffic,
+          nodes: snapshot.nodeTotals?.items ?? current.nodes,
+          userConnections: snapshot.userConnections ?? current.userConnections,
+        }));
+      } catch {
+        // Ignore malformed websocket frames; the dashboard will keep the last valid snapshot.
+      }
+    }
+
+    function scheduleReconnect() {
+      if (stopped || reconnectTimer !== undefined || document.visibilityState === "hidden") return;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = undefined;
+        openSocket();
+      }, 2000);
+    }
+
+    function openSocket() {
+      if (stopped || ws?.readyState === WebSocket.OPEN || ws?.readyState === WebSocket.CONNECTING) return;
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(`${protocol}//${window.location.host}/api/ws/dashboard?token=${encodeURIComponent(session.token)}`);
+      ws = socket;
+      socket.onmessage = applySnapshot;
+      socket.onclose = () => {
+        if (ws === socket) ws = null;
+        scheduleReconnect();
+      };
+      socket.onerror = () => {
+        socket.close();
+      };
+    }
+
+    function reconnectNow() {
+      clearReconnectTimer();
+      if (ws) {
+        const socket = ws;
+        ws = null;
+        socket.onclose = null;
+        socket.onerror = null;
+        socket.close();
+      }
+      openSocket();
+    }
+
+    function handleVisible() {
+      if (document.visibilityState === "visible") reconnectNow();
+    }
+
+    openSocket();
+    document.addEventListener("visibilitychange", handleVisible);
+    window.addEventListener("focus", reconnectNow);
+
+    return () => {
+      stopped = true;
+      clearReconnectTimer();
+      document.removeEventListener("visibilitychange", handleVisible);
+      window.removeEventListener("focus", reconnectNow);
+      ws?.close();
+    };
+  }, [refreshUserSpeeds, session.token]);
+
+  const totals = useMemo(() => calculateTotals(state.servers), [state.servers]);
+  const topNodes = useMemo(() => [...state.nodes].sort(byTraffic).slice(0, 5), [state.nodes]);
+  const topUsers = useMemo(() => [...state.users].sort(byUserTraffic).slice(0, 5), [state.users]);
+  const primaryServer = state.servers[0];
+
+  return (
+    <main className="app-shell">
+      <header className="topbar">
+        <button className="round-button" type="button" onClick={() => setMenuOpen(true)} aria-label="打开菜单">
+          <Menu />
+        </button>
+        <h1>{tabTitle(activeTab)}</h1>
+        <div className="top-actions">
+          <button className="round-button" type="button" onClick={onToggleTheme} aria-label="切换主题">
+            {dark ? <Sun /> : <Moon />}
+          </button>
+          <button className="avatar-button" type="button" onClick={onLogout} aria-label="退出登录">
+            {session.avatarUrl ? <img src={session.avatarUrl} alt="" /> : <span>{session.nickname?.[0] || session.username[0]}</span>}
+          </button>
+        </div>
+      </header>
+
+      {menuOpen && <SideMenu session={session} onClose={() => setMenuOpen(false)} onLogout={onLogout} />}
+
+      {error && (
+        <section className="notice-card">
+          <span>{error}</span>
+          <button type="button" onClick={() => void loadDashboard()}>
+            重试
+          </button>
+        </section>
+      )}
+
+      {activeTab !== "overview" ? (
+        <Placeholder title={tabTitle(activeTab)} />
+      ) : (
+        <div className="dashboard-content" aria-busy={loading}>
+          <section className="metric-grid">
+            <MetricCard variant="purple" title="总流量配额" value={formatGB(state.summary?.metrics.total_limit_gb)} detail={`剩余 ${formatGB(state.summary?.metrics.total_remaining_gb)}`} />
+            <MetricCard variant="blue" title="已用流量" value={formatGB(state.summary?.metrics.total_used_gb)} detail={`占比 ${formatPercent(state.summary?.metrics.usage_percentage)}`} />
+            <MetricCard variant="orange" title="实时网速" value={`↑ ${formatSpeed(totals.upload)}`} detail={`↓ ${formatSpeed(totals.download)}`} />
+            <MetricCard variant="green" title="运行时间" value={formatDurationSince(primaryServer?.xray_boot_time)} detail={primaryServer?.xray_running ? "Xray 运行中" : "等待数据"} />
+          </section>
+
+          <TrafficChart summary={state.summary} />
+          <NodeView nodes={topNodes} />
+          <UserView users={topUsers} connections={state.userConnections} speeds={state.userSpeeds} />
+          <ServerOverview server={primaryServer} upload={totals.upload} download={totals.download} />
+        </div>
+      )}
+
+      <nav className="bottom-nav" aria-label="主导航">
+        {[
+          ["overview", Home, "概览"],
+          ["nodes", Boxes, "节点"],
+          ["users", Users, "用户"],
+          ["subscriptions", BarChart3, "订阅"],
+          ["settings", Settings, "设置"],
+        ].map(([key, Icon, label]) => (
+          <button className={activeTab === key ? "active" : ""} key={String(key)} type="button" onClick={() => setActiveTab(String(key))}>
+            <Icon />
+            <span>{label as string}</span>
+          </button>
+        ))}
+      </nav>
+    </main>
+  );
+}
+
+function MetricCard({ title, value, detail, variant }: { title: string; value: string; detail: string; variant: string }) {
+  return (
+    <article className={`metric-card ${variant}`}>
+      <span>{title}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </article>
+  );
+}
+
+function TrafficChart({ summary }: { summary: TrafficSummary | null }) {
+  const data = summary?.history?.map((item) => ({
+    date: item.date.slice(5),
+    used: item.used_gb,
+  })) ?? [];
+
+  return (
+    <section className="panel-card chart-card">
+      <div className="panel-header">
+        <div>
+          <h2>每日流量趋势</h2>
+          <p>最近记录的日度流量趋势</p>
+        </div>
+        <div className="segmented">
+          <button>今天</button>
+          <button>本周</button>
+          <button className="active">本月</button>
+        </div>
+      </div>
+      <div className="chart-box">
+        {data.length > 0 ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={data} margin={{ left: 0, right: 12, top: 18, bottom: 4 }}>
+              <defs>
+                <linearGradient id="trafficGradient" x1="0" x2="0" y1="0" y2="1">
+                  <stop offset="5%" stopColor="#6c63ff" stopOpacity={0.32} />
+                  <stop offset="95%" stopColor="#6c63ff" stopOpacity={0.03} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke="#eef0f6" vertical={false} />
+              <XAxis dataKey="date" tick={{ fontSize: 15, fill: "#8a8f9d" }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 15, fill: "#8a8f9d" }} tickLine={false} axisLine={false} width={42} />
+              <Tooltip formatter={(value) => [`${value} GB`, "流量"]} />
+              <Area type="monotone" dataKey="used" stroke="#6c63ff" strokeWidth={3} fill="url(#trafficGradient)" connectNulls={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : (
+          <EmptyText>暂无历史记录</EmptyText>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function NodeView({ nodes }: { nodes: NodeTrafficItem[] }) {
+  return (
+    <section className="panel-card">
+      <PanelTitle icon={<Server />} title="节点视图" subtitle="按流量排序" />
+      <div className="list-stack">
+        {nodes.length ? nodes.map((node) => <TrafficRow key={node.node_id} name={node.node_name} up={node.uplink} down={node.downlink} badge={node.server_name} />) : <EmptyText>暂无节点数据</EmptyText>}
+      </div>
+    </section>
+  );
+}
+
+function UserView({
+  users,
+  connections,
+  speeds,
+}: {
+  users: UserTrafficSummary[];
+  connections: Record<string, number>;
+  speeds: Record<string, number>;
+}) {
+  return (
+    <section className="panel-card">
+      <PanelTitle icon={<Users />} title="用户视图" subtitle="按流量排序" />
+      <div className="list-stack">
+        {users.length ? (
+          users.map((user) => (
+            <TrafficRow
+              key={user.username}
+              name={user.username}
+              up={user.cycle_uplink}
+              down={user.cycle_downlink}
+              badge={formatUserRealtime(connections[user.username], speeds[user.username])}
+            />
+          ))
+        ) : (
+          <EmptyText>暂无用户数据</EmptyText>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ServerOverview({ server, upload, download }: { server?: RemoteServer; upload: number; download: number }) {
+  const usedGB = server?.traffic_used ? server.traffic_used / 1024 / 1024 / 1024 : 0;
+  const limitGB = server?.traffic_limit && server.traffic_limit > 0 ? server.traffic_limit / 1024 / 1024 / 1024 : null;
+  const remainingGB = limitGB == null ? null : Math.max(0, limitGB - usedGB);
+  const usage = limitGB ? (usedGB / limitGB) * 100 : null;
+
+  return (
+    <section className="panel-card server-card">
+      <div className="panel-header compact">
+        <h2>服务器概览</h2>
+        <div className="speed-pair">
+          <span>↑ {formatSpeed(upload)}</span>
+          <span>↓ {formatSpeed(download)}</span>
+        </div>
+      </div>
+      {server ? (
+        <>
+          <h3>{server.name}</h3>
+          <div className="server-metrics">
+            <InfoBlock label="已用" value={formatGB(usedGB)} />
+            <InfoBlock label="总量" value={limitGB == null ? "无限" : formatGB(limitGB)} />
+            <InfoBlock label="剩余" value={remainingGB == null ? "--" : formatGB(remainingGB)} />
+            <InfoBlock label="使用率" value={usage == null ? "--" : formatPercent(usage)} />
+          </div>
+        </>
+      ) : (
+        <EmptyText>暂无服务器数据</EmptyText>
+      )}
+    </section>
+  );
+}
+
+function SideMenu({ session, onClose, onLogout }: { session: Session; onClose: () => void; onLogout: () => void }) {
+  return (
+    <div className="menu-layer" role="presentation" onClick={onClose}>
+      <aside className="side-menu" role="dialog" aria-label="菜单" onClick={(event) => event.stopPropagation()}>
+        <div className="menu-top">
+          <h2>妙妙屋 X</h2>
+          <button className="ghost-button" onClick={onClose} type="button">
+            ×
+          </button>
+        </div>
+        <div className="menu-profile">
+          <div className="avatar-large">{session.avatarUrl ? <img src={session.avatarUrl} alt="" /> : session.username[0]}</div>
+          <strong>{session.nickname || session.username}</strong>
+          <span>{session.role}</span>
+        </div>
+        {["订阅链接", "生成订阅", "节点管理", "服务管理", "用户管理", "套餐管理", "证书管理", "模板管理", "订阅管理", "系统设置"].map((item) => (
+          <button className="menu-item" key={item} type="button">
+            <Gauge />
+            <span>{item}</span>
+          </button>
+        ))}
+        <button className="menu-item danger" type="button" onClick={onLogout}>
+          <LogOut />
+          <span>退出登录</span>
+        </button>
+      </aside>
+    </div>
+  );
+}
+
+function PanelTitle({ icon, title, subtitle }: { icon: React.ReactNode; title: string; subtitle: string }) {
+  return (
+    <div className="panel-header">
+      <div>
+        <h2>
+          {icon}
+          {title}
+        </h2>
+        <p>{subtitle}</p>
+      </div>
+      <button className="more-button" type="button">
+        更多
+      </button>
+    </div>
+  );
+}
+
+function TrafficRow({ name, up, down, badge }: { name: string; up: number; down: number; badge?: string }) {
+  return (
+    <div className="traffic-row">
+      <div>
+        <strong>{name}</strong>
+        {badge && <span>{badge}</span>}
+      </div>
+      <div className="traffic-values">
+        <span>↑ {formatBytes(up)}</span>
+        <span>↓ {formatBytes(down)}</span>
+      </div>
+    </div>
+  );
+}
+
+function InfoBlock({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="info-block">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function EmptyText({ children }: { children: React.ReactNode }) {
+  return <div className="empty-text">{children}</div>;
+}
+
+function Placeholder({ title }: { title: string }) {
+  return (
+    <section className="panel-card placeholder-card">
+      <h2>{title}</h2>
+      <p>第一阶段先完成概览 Dashboard。此入口保留给后续页面迁移。</p>
+    </section>
+  );
+}
+
+function calculateTotals(servers: RemoteServer[]) {
+  return servers.reduce(
+    (acc, server) => ({
+      upload: acc.upload + (server.current_upload_speed ?? 0),
+      download: acc.download + (server.current_download_speed ?? 0),
+    }),
+    { upload: 0, download: 0 },
+  );
+}
+
+function byTraffic(a: NodeTrafficItem, b: NodeTrafficItem) {
+  return b.uplink + b.downlink - (a.uplink + a.downlink);
+}
+
+function byUserTraffic(a: UserTrafficSummary, b: UserTrafficSummary) {
+  return b.cycle_uplink + b.cycle_downlink - (a.cycle_uplink + a.cycle_downlink);
+}
+
+function aggregateUserSpeeds(results: PromiseSettledResult<Awaited<ReturnType<typeof fetchUserSpeeds>>>[]) {
+  const speeds: Record<string, number> = {};
+  for (const result of results) {
+    if (result.status !== "fulfilled") continue;
+    for (const [username, speed] of Object.entries(result.value.user_speeds ?? {})) {
+      speeds[username] = (speeds[username] ?? 0) + speed;
+    }
+  }
+  return speeds;
+}
+
+function formatUserRealtime(connections?: number, speed?: number) {
+  if (!connections) return undefined;
+
+  const parts: string[] = [];
+  parts.push(`🔌 ${connections}`);
+  if (speed) parts.push(`⚡ ${formatSpeed(speed)}`);
+  return parts.join(" · ");
+}
+
+function formatPercent(value?: number | null) {
+  if (value == null || Number.isNaN(value)) return "--";
+  return `${value.toFixed(value >= 10 ? 1 : 2)}%`;
+}
+
+function tabTitle(tab: string) {
+  const titles: Record<string, string> = {
+    overview: "概览",
+    nodes: "节点",
+    users: "用户",
+    subscriptions: "订阅",
+    settings: "设置",
+  };
+  return titles[tab] ?? "概览";
+}
+
+createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>,
+);

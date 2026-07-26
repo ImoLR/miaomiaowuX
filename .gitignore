@@ -37,6 +37,10 @@ miaomiaowu.db
 # 前端 source 已迁私有 repo;本地开发者 clone 到该目录后,git 不会追踪到任何前端文件。
 # 历史上已 commit 的文件需要 `git rm -r miaomiaowux-frontend/` 显式从 index 移除一次。
 miaomiaowux-frontend/
+frontend/node_modules/
+frontend/*.tsbuildinfo
+frontend/vite.config.d.ts
+frontend/vite.config.js
 .idea
 VALIDATION_INTEGRATION_PLAN.md
 
