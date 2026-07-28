@@ -3119,8 +3119,9 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 	} else if refreshed > 0 {
 		log.Printf("[Remote Manage] Refreshed %d node(s) server address → %s for %s", refreshed, serverHost, server.Name)
 	}
-	// v6 节点单独校正到当前 IPv6 地址(RefreshNodesServerAddress 只动 v4/域名节点)
-	if v6 := strings.TrimSpace(server.IPAddressV6); v6 != "" {
+	// v6 节点单独校正(RefreshNodesServerAddress 只动 v4/域名节点)。
+	// 锁定入口 IP 时用手填地址(v6RefreshTarget),避免动态出口 IPv6 覆盖锁定值。
+	if v6 := v6RefreshTarget(server); v6 != "" {
 		if refreshed, err := h.repo.RefreshNodesServerAddressV6(ctx, server.Name, v6); err != nil {
 			log.Printf("[Remote Manage] Refresh v6 node server address failed for %s: %v", server.Name, err)
 		} else if refreshed > 0 {
@@ -3678,6 +3679,23 @@ func chooseClashServerHost(server *storage.RemoteServer) string {
 	return strings.TrimSpace(server.IPAddressV6)
 }
 
+// v6RefreshTarget 返回该服务器 v6 节点(ip_family='v6')的 clash server 应刷成的地址。
+// 锁定入口 IP 时:v6 节点同样只用手填的「服务器地址」(PullAddress→IPAddress),与 chooseClashServerHost
+// 的锁定分支保持一致 —— NAT 机的动态出口 IPv6 连不上,只有手填的静态入口 IP 能连。
+// 未锁定时:沿用 agent 心跳上报的动态 IPAddressV6(现状行为)。
+func v6RefreshTarget(server *storage.RemoteServer) string {
+	if server == nil {
+		return ""
+	}
+	if server.LockEntryIP {
+		if p := strings.TrimSpace(server.PullAddress); p != "" {
+			return p
+		}
+		return strings.TrimSpace(server.IPAddress)
+	}
+	return strings.TrimSpace(server.IPAddressV6)
+}
+
 // isLoopbackHost 判断 host 是否为回环地址(127.0.0.1 / ::1 / localhost)。
 func isLoopbackHost(host string) bool {
 	h := strings.ToLower(strings.TrimSpace(host))
@@ -3991,7 +4009,9 @@ func (h *RemoteManageHandler) addStreamSettings(proxy map[string]interface{}, st
 	// 处理现实
 	if security == "reality" {
 		proxy["tls"] = true
-		proxy["skip-cert-verify"] = true
+		// reality 靠 X25519 公钥验证、不走 CA 校验,skip-cert-verify 对 reality 是 no-op;
+		// 输出 false 避免"默认跳过证书校验"的误导(mihomo 对 reality 忽略此字段,连通性不变)。
+		proxy["skip-cert-verify"] = false
 		if realitySettings, ok := streamSettings["realitySettings"].(map[string]interface{}); ok {
 			realityOpts := map[string]interface{}{}
 			if publicKey, ok := realitySettings["publicKey"].(string); ok {
@@ -4574,7 +4594,7 @@ func (h *RemoteManageHandler) HandleAddWebsite(w http.ResponseWriter, r *http.Re
 
 	certName := "_." + rootDomain
 	if h.certHandler != nil {
-		if cert, certErr := h.repo.GetCertificateByDomain(ctx, rootDomain, req.ServerID); certErr == nil && cert != nil {
+		if cert, certErr := h.repo.FindDeployableCertByDomain(ctx, rootDomain, req.ServerID); certErr == nil && cert != nil {
 			certName = certDeployFilename(cert.Domain)
 		}
 	}
@@ -4635,7 +4655,7 @@ func (h *RemoteManageHandler) HandleAddWebsite(w http.ResponseWriter, r *http.Re
 
 	// 5. 部署证书
 	if h.certHandler != nil {
-		cert, certErr := h.repo.GetCertificateByDomain(ctx, rootDomain, req.ServerID)
+		cert, certErr := h.repo.FindDeployableCertByDomain(ctx, rootDomain, req.ServerID)
 		if certErr == nil && cert != nil && cert.CertPEM != "" && cert.KeyPEM != "" {
 			payload := WSCertDeployPayload{
 				Domain:   rootDomain,

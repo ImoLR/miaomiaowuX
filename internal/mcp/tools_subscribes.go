@@ -36,7 +36,7 @@ func registerSubscribeTools(s *server.MCPServer, b *bridge) {
 		mcpgo.WithNumber("template_id", mcpgo.Description("绑定的 V3 模板 ID(可选)")),
 		mcpgo.WithString("template_filename", mcpgo.Description("绑定的 V3 模板文件名(可选)")),
 		mcpgo.WithString("custom_short_code", mcpgo.Description("自定义短码(可选,字母数字 _ -,长度 2-16)")),
-		mcpgo.WithArray("selected_tags", mcpgo.Description("筛选标签(可选,V3 模板下生效)")),
+		mcpgo.WithArray("selected_tags", mcpgo.Description("筛选标签(可选,V3 模板下生效)"), mcpgo.WithStringItems()),
 		mcpgo.WithString("remark", mcpgo.Description("备注(可选)")),
 	),
 		func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -49,7 +49,7 @@ func registerSubscribeTools(s *server.MCPServer, b *bridge) {
 		mcpgo.WithNumber("template_id", mcpgo.Description("新模板 ID")),
 		mcpgo.WithString("template_filename", mcpgo.Description("新模板文件名")),
 		mcpgo.WithString("custom_short_code", mcpgo.Description("新短码")),
-		mcpgo.WithArray("selected_tags", mcpgo.Description("新筛选标签")),
+		mcpgo.WithArray("selected_tags", mcpgo.Description("新筛选标签"), mcpgo.WithStringItems()),
 		mcpgo.WithString("remark", mcpgo.Description("新备注")),
 	),
 		func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

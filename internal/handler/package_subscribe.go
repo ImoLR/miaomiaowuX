@@ -466,9 +466,9 @@ func (h *PackageSubscribeHandler) writeTrafficHeader(ctx context.Context, w http
 	// 之前这里硬编码 download=0,导致客户端永远显示已用 0。
 	used, _ := h.repo.GetUserBillableTraffic(ctx, user.Username)
 	info := fmt.Sprintf("upload=0; download=%d; total=%d", used, limitBytes)
-	if user.PackageEndDate != nil {
-		info += fmt.Sprintf("; expire=%d", user.PackageEndDate.Unix())
-	}
+	// expire:有到期日输出实际时间戳;永久套餐(PackageEndDate 为 nil)输出长期占位
+	// (2099-12-31),避免小火箭等客户端因缺失/为 0 的 expire 识别不了。见 appendExpire。
+	info = appendExpire(info, user.PackageEndDate)
 	w.Header().Set("subscription-userinfo", info)
 }
 

@@ -142,20 +142,13 @@ func (h *TrafficSummaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	}
 
 	if isAdmin {
-		// 两道守卫,任一命中都跳过 record — 避免污染 traffic_records:
-		//   1. serverListOK=false:ListRemoteServers 出错,totalLimit/totalUsed 全 0 是假象不是真实状态
-		//   2. totalLimit==0 && totalUsed==0:理论上正常环境不可能(必有 server 配置 traffic_limit),
-		//      出现 = 数据异常,写进去会被 ON CONFLICT(date) DO UPDATE 覆盖正确历史
-		//      → 前端 loadHistory delta = today - 0 ≈ 全部历史累计,首页图表出 1.9TB 这种诡异数字
-		switch {
-		case !serverListOK:
+		// 只在 ListRemoteServers 出错时跳过 —— 此时 totalLimit/totalUsed 全 0 是"读不到"的假象,不可信。
+		// 「合法的全 0」(没配限额 + 没用量)不再当异常:RecordDaily 已有存储层护栏,全 0 不会覆盖
+		// 当天已有的非 0 历史;所以这里照常写,避免此前每次汇总(前端 5s 轮询)刷一条 WARN 的问题。
+		if !serverListOK {
 			logger.Warn("[流量] 跳过快照: ListRemoteServers 失败,无法判断当前流量")
-		case totalLimit == 0 && totalUsed == 0:
-			logger.Warn("[流量] 跳过快照: totalLimit/totalUsed 全 0,可能 DB 临时异常")
-		default:
-			if err := h.recordSnapshot(ctx, totalLimit, totalUsed, totalRemaining); err != nil {
-				logger.Info("[流量] 记录快照失败", "error", err)
-			}
+		} else if err := h.recordSnapshot(ctx, totalLimit, totalUsed, totalRemaining); err != nil {
+			logger.Info("[流量] 记录快照失败", "error", err)
 		}
 	} else if haveUser {
 		if err := h.repo.RecordUserDaily(ctx, username, time.Now(), totalLimit, totalUsed, totalRemaining); err != nil {
@@ -232,14 +225,10 @@ func (h *TrafficSummaryHandler) RecordDailyUsage(ctx context.Context) error {
 		totalRemaining = 0
 	}
 
-	// 守卫:ListRemoteServers 失败 / 没数据时不写入,避免 ON CONFLICT(date) 把已有正确历史覆盖成 0。
-	// 跟 BuildSummary admin 守卫一致。
-	switch {
-	case !serverListOK:
+	// 守卫:仅 ListRemoteServers 失败时跳过(此时全 0 是"读不到"的假象)。合法的全 0 照常写 ——
+	// RecordDaily 已有存储层护栏,不会用全 0 覆盖当天已有非 0 历史。跟 ServeHTTP 的守卫一致。
+	if !serverListOK {
 		logger.Warn("[流量记录] 跳过快照: ListRemoteServers 失败,无法判断当前流量")
-		return nil
-	case totalLimit == 0 && totalUsed == 0:
-		logger.Warn("[流量记录] 跳过快照: totalLimit/totalUsed 全 0,可能 DB 临时异常")
 		return nil
 	}
 
@@ -599,11 +588,11 @@ func (h *TrafficSummaryHandler) fetchExternalSubscriptionTraffic(ctx context.Con
 	}
 
 	if len(usedExternalURLs) == 0 {
-		logger.Info("[流量] 未找到使用中的外部订阅")
+		logger.Debug("[流量] 未找到使用中的外部订阅")
 		return 0, 0
 	}
 
-	logger.Info("[流量] 找到使用中的外部订阅", "count", len(usedExternalURLs))
+	logger.Debug("[流量] 找到使用中的外部订阅", "count", len(usedExternalURLs))
 
 	// 获取所有外部订阅
 	subs, err := h.repo.ListExternalSubscriptions(ctx, username)
@@ -634,9 +623,9 @@ func (h *TrafficSummaryHandler) fetchExternalSubscriptionTraffic(ctx context.Con
 		totalUsed += sub.Upload + sub.Download
 
 		if sub.Expire == nil {
-			logger.Info("[流量] 添加长期订阅流量", "name", sub.Name, "limit", sub.Total, "used", sub.Upload+sub.Download)
+			logger.Debug("[流量] 添加长期订阅流量", "name", sub.Name, "limit", sub.Total, "used", sub.Upload+sub.Download)
 		} else {
-			logger.Info("[流量] 添加订阅流量",
+			logger.Debug("[流量] 添加订阅流量",
 				"name", sub.Name,
 				"limit", sub.Total,
 				"used", sub.Upload+sub.Download,
@@ -644,7 +633,7 @@ func (h *TrafficSummaryHandler) fetchExternalSubscriptionTraffic(ctx context.Con
 		}
 	}
 
-	logger.Info("[流量] 外部订阅流量总计", "limit", totalLimit, "used", totalUsed)
+	logger.Debug("[流量] 外部订阅流量总计", "limit", totalLimit, "used", totalUsed)
 	return totalLimit, totalUsed
 }
 

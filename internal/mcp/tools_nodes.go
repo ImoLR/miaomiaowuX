@@ -85,7 +85,7 @@ func registerNodeTools(s *server.MCPServer, b *bridge) {
 		})
 
 	s.AddTool(writeTool("node_batch_delete", "批量删除节点(半径较大,需 confirm=true)。", true,
-		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("节点 ID 数组")),
+		mcpgo.WithArray("ids", mcpgo.Required(), mcpgo.Description("节点 ID 数组"), mcpgo.WithNumberItems()),
 		mcpgo.WithBoolean("confirm", mcpgo.Description("必须为 true 才执行")),
 	),
 		func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
@@ -95,11 +95,21 @@ func registerNodeTools(s *server.MCPServer, b *bridge) {
 			return b.send(ctx, http.MethodPost, "/api/admin/nodes/batch-delete", argsBody(req))
 		})
 
-	s.AddTool(writeTool("node_speedtest", "对指定节点发起测速(异步,结果稍后可经 speedtest 结果查询)。", false,
+	s.AddTool(writeTool("node_speedtest", "对指定节点发起测速(异步,结果稍后经 node_speedtest_results 查询)。", false,
 		mcpgo.WithString("node_id", mcpgo.Required(), mcpgo.Description("节点 ID")),
-		mcpgo.WithNumber("tester_id", mcpgo.Description("家用测速端 ID;省略则用主控本机")),
+		mcpgo.WithNumber("tester_id", mcpgo.Description("家用测速端 ID(经 speedtest_testers 查询);省略则用主控本机")),
 	),
 		func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 			return b.send(ctx, http.MethodPost, "/api/admin/speedtest/run", argsBody(req))
+		})
+
+	s.AddTool(readTool("node_speedtest_results", "查询最近的节点测速结果(下载/上传速度、延迟等)。与 node_speedtest 配套:先触发、稍后读结果。"),
+		func(ctx context.Context, _ mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+			return b.get(ctx, "/api/admin/speedtest/results")
+		})
+
+	s.AddTool(readTool("speedtest_testers", "列出已注册的家用测速端(id / 名称 / 在线状态)。node_speedtest 的 tester_id 参数取值来源。"),
+		func(ctx context.Context, _ mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
+			return b.get(ctx, "/api/admin/speedtest/testers")
 		})
 }

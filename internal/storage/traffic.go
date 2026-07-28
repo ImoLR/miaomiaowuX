@@ -79,6 +79,8 @@ type TrafficRepository struct {
 	attrCache attributorCache
 	// emailUserCache 缓存 email → username 解析结果,见 ResolveUsernameByEmailCached。
 	emailUserCache emailUserCache
+	// heartbeatCache 节流 UpdateRemoteServerLastActivity 的 DB 写放大,见该函数注释。
+	heartbeatCache heartbeatThrottle
 }
 
 // emailUserCache 是 email → username 的解析缓存。
@@ -98,6 +100,21 @@ type emailUserCache struct {
 // 60 秒的滞后意味着这类变更最迟 1 分钟后才影响流量归属,下一轮自愈;
 // 换来的是把每轮数万次全表扫描降到接近 0。
 const emailUserCacheTTL = 60 * time.Second
+
+// heartbeatThrottle 节流 UpdateRemoteServerLastActivity 的高频 UPDATE 写放大。
+// WS 速度上报间隔 3s,但离线判定阈值 60s → 稳态下每服务器 3s 写一次 last_heartbeat 是 20 倍写放大。
+// 节流窗口内(10s)命中缓存 → 直接返回 (Connected, "", "", false, nil),连 SELECT 都省掉 → 稳态零 DB I/O。
+// 只有距上次写 ≥10s 或状态非 CONNECTED 时才真正 UPDATE。状态翻转(OFFLINE→CONNECTED)必穿透并返回真 prev,
+// 保证 traffic.go / federation_poller.go 的离线→在线 TG 通知逻辑不受影响。
+type heartbeatThrottle struct {
+	mu         sync.RWMutex
+	lastWrites map[int64]time.Time // serverID → 最后一次成功 UPDATE 的时间
+}
+
+// heartbeatThrottleWindow:10 秒内不重复写同一 server 的 last_heartbeat。
+// 离线判定阈值 60s,10s 陈旧度远小于阈值 → 命中节流时服务器不可能被 MarkOfflineRemoteServers 标为离线。
+const heartbeatThrottleWindow = 10 * time.Second
+
 
 // SubscriptionLink 表示向客户端公开的可配置订阅条目。
 type SubscriptionLink struct {
@@ -3825,6 +3842,10 @@ func (r *TrafficRepository) RecordDaily(ctx context.Context, date time.Time, tot
 	// 且与 node/user 快照表对不上。三处必须同一个时区口径。
 	normalized := date.Format("2006-01-02")
 
+	// 存储层护栏:全 0 的写入**不覆盖**当天已有的非 0 记录 —— 防"DB 临时报错→全0→ON CONFLICT
+	// 覆盖正确历史"事故(2026-05-31 发生过)。只在「新值非 0」或「旧值本就是 0」时才更新;
+	// 新值全 0 且旧值非 0 → WHERE 不成立、整条 DO UPDATE 跳过,保留正确历史。
+	// 有了这道护栏,handler 层就不必再靠"全 0=异常"的启发式跳过 + 刷 WARN(合法的全 0 环境会误报刷屏)。
 	const stmt = `
 INSERT INTO traffic_records (date, total_limit, total_used, total_remaining)
 VALUES (?, ?, ?, ?)
@@ -3832,7 +3853,9 @@ ON CONFLICT(date) DO UPDATE SET
     total_limit = excluded.total_limit,
     total_used = excluded.total_used,
     total_remaining = excluded.total_remaining,
-    created_at = CURRENT_TIMESTAMP;
+    created_at = CURRENT_TIMESTAMP
+WHERE excluded.total_used <> 0 OR excluded.total_limit <> 0
+   OR (traffic_records.total_used = 0 AND traffic_records.total_limit = 0);
 `
 
 	if _, err := r.db.ExecContext(ctx, stmt, normalized, totalLimit, totalUsed, totalRemaining); err != nil {
@@ -7332,7 +7355,14 @@ func (r *TrafficRepository) GetRemoteServerTrafficTotals(ctx context.Context, se
 			continue
 		}
 		aggregated, _ := r.GetServerTrafficUsed(ctx, id)
-		used += aggregated + server.TrafficUsedOffset
+		serverUsed := aggregated + server.TrafficUsedOffset
+		// 按服务器 clamp 到 0,避免负 offset 的服务器抵消其他服务器的正常用量。
+		// 反例:A 用 1GB offset -500MB → 500MB;B 用 2GB offset -3GB → -1GB;
+		// 不 clamp 直接求和 = -500MB(错误);clamp 后求和 = 500MB + 0 = 500MB(正确)。
+		if serverUsed < 0 {
+			serverUsed = 0
+		}
+		used += serverUsed
 		limit += server.TrafficLimit
 	}
 	return limit, used, nil
@@ -7348,7 +7378,11 @@ func (r *TrafficRepository) GetAllRemoteServersTrafficTotals(ctx context.Context
 	}
 	for _, s := range servers {
 		aggregated, _ := r.GetServerTrafficUsed(ctx, s.ID)
-		used += aggregated + s.TrafficUsedOffset
+		serverUsed := aggregated + s.TrafficUsedOffset
+		if serverUsed < 0 {
+			serverUsed = 0
+		}
+		used += serverUsed
 		limit += s.TrafficLimit
 	}
 	return limit, used, nil
@@ -9331,6 +9365,31 @@ func (r *TrafficRepository) GetUserBillableTraffic(ctx context.Context, username
 	return int64(billable), nil
 }
 
+// GetUserBillableTrafficByDirection 返回该用户本周期计费流量的**分方向**拆分(上行、下行 bytes)。
+//
+// 与 GetUserBillableTraffic 完全同源同口径 —— 同一张 user_email_traffic 表、同一条
+// weighted_* - cycle_base_weighted_* 计费公式(倍率已由 collector 折算进 weighted_*),
+// 唯一区别是不把上下行相加、而是分别返回。供 tgbot /user-summary 用:bot 卡片要分方向
+// 显示"本周期 ↑ ↓",且 up+down 恰好等于 GetUserBillableTraffic 的合计(与 Web 面板一致)。
+func (r *TrafficRepository) GetUserBillableTrafficByDirection(ctx context.Context, username string) (int64, int64, error) {
+	if r == nil || r.db == nil {
+		return 0, 0, errors.New("traffic repository not initialized")
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return 0, 0, errors.New("username is required")
+	}
+	var up, down float64
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(MAX(weighted_uplink - cycle_base_weighted_uplink, 0)), 0),
+		        COALESCE(SUM(MAX(weighted_downlink - cycle_base_weighted_downlink, 0)), 0)
+		 FROM user_email_traffic WHERE attributed_username = ?`, username).Scan(&up, &down)
+	if err != nil {
+		return 0, 0, fmt.Errorf("query billable traffic by direction: %w", err)
+	}
+	return int64(up), int64(down), nil
+}
+
 // GetAllUserBillableTraffic 一次性返回所有用户的本周期计费流量(username → bytes)。
 // 给用户列表这类要展示 N 个用户的地方用,避免 N+1。语义同 GetUserBillableTraffic。
 func (r *TrafficRepository) GetAllUserBillableTraffic(ctx context.Context) (map[string]int64, error) {
@@ -10281,6 +10340,26 @@ func (r *TrafficRepository) UpdateRemoteServerSameHost(ctx context.Context, toke
 	return err
 }
 
+// UpdateRemoteServerV6Info 按 serverID 更新 v6 相关网络信息(ip_address_v6 / domain / domain_v6 / ipv6_enabled)。
+// 供联邦(分享服务器)消费方把拥有方 server-info 透传的 v6 信息同步进本地行 —— 否则分享服务器无 v6、
+// 其节点无法走 IPv6。空字符串不覆盖旧值(COALESCE(NULLIF));ipv6_enabled 直接覆盖(拥有方是权威)。
+func (r *TrafficRepository) UpdateRemoteServerV6Info(ctx context.Context, serverID int64, ipv6, domain, domainV6 string, ipv6Enabled bool) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE remote_servers SET
+		ip_address_v6 = COALESCE(NULLIF(?, ''), ip_address_v6),
+		domain = COALESCE(NULLIF(?, ''), domain),
+		domain_v6 = COALESCE(NULLIF(?, ''), domain_v6),
+		ipv6_enabled = ?,
+		updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, ipv6, domain, domainV6, boolToInt(ipv6Enabled), serverID)
+	if err != nil {
+		return fmt.Errorf("update remote server v6 info: %w", err)
+	}
+	return nil
+}
+
 // 更新远程服务器的检测信号和状态。
 // ipAddressV6 为空时保留 db 现有值(老 agent 兼容)。
 // 返回 (ipChanged, latestServer, err):IP 漂移时 ipChanged=true + latestServer 是 UPDATE 后状态,
@@ -10359,7 +10438,7 @@ func (r *TrafficRepository) MarkRemoteServerOfflineByID(ctx context.Context, ser
 		return prevStatus, name, ip, nil
 	}
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE remote_servers SET status = ?, offline_since = CURRENT_TIMESTAMP, offline_notified = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,
+		`UPDATE remote_servers SET status = ?, current_upload_speed = 0, current_download_speed = 0, offline_since = CURRENT_TIMESTAMP, offline_notified = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,
 		RemoteServerStatusOffline, serverID, RemoteServerStatusConnected,
 	)
 	if err != nil {
@@ -10375,6 +10454,17 @@ func (r *TrafficRepository) MarkRemoteServerOfflineByID(ctx context.Context, ser
 func (r *TrafficRepository) UpdateRemoteServerLastActivity(ctx context.Context, serverID int64) (string, string, string, bool, error) {
 	if r == nil || r.db == nil {
 		return "", "", "", false, errors.New("traffic repository not initialized")
+	}
+
+	// 节流:距上次成功写入 < heartbeatThrottleWindow(10s)→ 跳过 SELECT + UPDATE。
+	// 此时 last_heartbeat 至多 10s 陈旧,远小于 60s 离线阈值 → 服务器必然仍是 CONNECTED,
+	// 直接返回 (Connected, "", "", false, nil) 恒正确:调用方的上线通知仅在 prev==OFFLINE 时触发,
+	// 而这里根本不可能处于 OFFLINE,不会漏发也不会误发。
+	r.heartbeatCache.mu.RLock()
+	last, ok := r.heartbeatCache.lastWrites[serverID]
+	r.heartbeatCache.mu.RUnlock()
+	if ok && time.Since(last) < heartbeatThrottleWindow {
+		return RemoteServerStatusConnected, "", "", false, nil
 	}
 
 	// 首先检查当前状态以记录状态更改
@@ -10394,6 +10484,14 @@ func (r *TrafficRepository) UpdateRemoteServerLastActivity(ctx context.Context, 
 	if err != nil {
 		return currentStatus, serverName, ipAddress, prevOfflineNotified, fmt.Errorf("update remote server last activity: %w", err)
 	}
+
+	// 记录本次成功写入时间,供下一轮节流判定。
+	r.heartbeatCache.mu.Lock()
+	if r.heartbeatCache.lastWrites == nil {
+		r.heartbeatCache.lastWrites = make(map[int64]time.Time)
+	}
+	r.heartbeatCache.lastWrites[serverID] = time.Now()
+	r.heartbeatCache.mu.Unlock()
 
 	return currentStatus, serverName, ipAddress, prevOfflineNotified, nil
 }
@@ -11258,7 +11356,7 @@ func (r *TrafficRepository) MarkOfflineRemoteServers(ctx context.Context, timeou
 	}
 
 	// 现在执行更新
-	const stmt = `UPDATE remote_servers SET status = ?, offline_since = CURRENT_TIMESTAMP, offline_notified = 0, updated_at = CURRENT_TIMESTAMP WHERE status = ? AND last_heartbeat < ?`
+	const stmt = `UPDATE remote_servers SET status = ?, current_upload_speed = 0, current_download_speed = 0, offline_since = CURRENT_TIMESTAMP, offline_notified = 0, updated_at = CURRENT_TIMESTAMP WHERE status = ? AND last_heartbeat < ?`
 
 	result, err := r.db.ExecContext(ctx, stmt, RemoteServerStatusOffline, RemoteServerStatusConnected, cutoff)
 	if err != nil {
@@ -12174,6 +12272,42 @@ func (r *TrafficRepository) GetCertificateByDomain(ctx context.Context, domain s
 			return nil, ErrCertificateNotFound
 		}
 		return nil, fmt.Errorf("get certificate by domain: %w", err)
+	}
+
+	return &cert, nil
+}
+
+// FindDeployableCertByDomain 在「全部服务器」范围内找一张可部署(已签发、含 PEM)的证书,
+// 用于把证书下发/嵌入到某台服务器的配置里。证书是共享资源:不管当初是哪台服务器申请的,
+// 只要证书列表里有该域名的有效证书,任何服务器都能用。
+//
+// 与 GetCertificateByDomain(按 remote_server_id 精确匹配、供创建去重用)不同,这里只按 domain 匹配,
+// 排序偏好:① 优先 preferredServerID 自己申请的 → ② 其次 status=valid → ③ 再取最新(id DESC)。
+// 找不到任何含 PEM 的证书返回 ErrCertificateNotFound。
+func (r *TrafficRepository) FindDeployableCertByDomain(ctx context.Context, domain string, preferredServerID int64) (*Certificate, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+
+	row := r.db.QueryRowContext(ctx, `
+		SELECT id, domain, email, provider, cert_path, key_path, cert_pem, key_pem,
+		       status, expiry_date, issue_date, auto_renew, challenge_mode, webroot_path,
+		       remote_server_id, message, dns_provider_id, deploy_target, deploy_cert_path, deploy_key_path, auto_deploy,
+		       created_at, updated_at
+		FROM certificates
+		WHERE domain = ? AND cert_pem <> '' AND key_pem <> ''
+		ORDER BY CASE WHEN remote_server_id = ? THEN 0 ELSE 1 END,
+		         CASE WHEN status = 'valid' THEN 0 ELSE 1 END,
+		         id DESC
+		LIMIT 1
+	`, domain, preferredServerID)
+
+	cert, err := scanCertificate(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrCertificateNotFound
+		}
+		return nil, fmt.Errorf("find deployable certificate by domain: %w", err)
 	}
 
 	return &cert, nil

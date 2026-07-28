@@ -302,8 +302,9 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 				log.Printf("[RemoteHeartbeat] refreshed %d node(s) clash.server → %s for %s", n, newHost, result.Server.Name)
 			}
 		}
-		// v6 节点单独刷成新的 IPv6 地址(RefreshNodesServerAddress 只动 v4/域名节点)
-		if v6 := strings.TrimSpace(result.Server.IPAddressV6); v6 != "" {
+		// v6 节点单独刷成新的 IPv6 地址(RefreshNodesServerAddress 只动 v4/域名节点)。
+		// 锁定入口 IP 时用手填地址(v6RefreshTarget),避免动态出口 IPv6 覆盖锁定值。
+		if v6 := v6RefreshTarget(result.Server); v6 != "" {
 			if n, e := h.repo.RefreshNodesServerAddressV6(ctx, result.Server.Name, v6); e != nil {
 				log.Printf("[RemoteHeartbeat] refresh v6 nodes for %s failed: %v", result.Server.Name, e)
 			} else if n > 0 {

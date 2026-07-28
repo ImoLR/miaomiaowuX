@@ -64,6 +64,9 @@ func (h *ServerShareHandler) handleCreate(w http.ResponseWriter, r *http.Request
 	var req struct {
 		ServerID int64  `json:"server_id"`
 		Label    string `json:"label"`
+		// AllowManageXray 允许接收方查看/修改完整 Xray 配置(全权)。默认 false = 只能管自己经本分享建的入站,
+		// 防止接收方拉全量入站/配置反推其他用户的连接链接。
+		AllowManageXray bool `json:"allow_manage_xray"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ServerID <= 0 {
 		writeError(w, http.StatusBadRequest, errors.New("server_id required"))
@@ -80,7 +83,7 @@ func (h *ServerShareHandler) handleCreate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	id, err := h.repo.CreateSharedServer(r.Context(), req.ServerID, hashShareToken(token), req.Label)
+	id, err := h.repo.CreateSharedServer(r.Context(), req.ServerID, hashShareToken(token), req.Label, req.AllowManageXray)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

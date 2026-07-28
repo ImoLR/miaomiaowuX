@@ -2053,6 +2053,16 @@ func (h *ChildManageHandler) addOutbound(ctx context.Context, handlerClient comm
 		return fmt.Errorf("failed to build outbound config: %w", err)
 	}
 
+	// 先尝试删除同名的 tag，避免 "existing tag found" 错误
+	// 场景:routed 出站删除时 remove 未完全落地(错误被吞),运行时残留同 tag outbound,
+	// 再次添加时 xray 报 existing tag found → agent 500 → 主控 502。与 addInbound 同款幂等处理。
+	if tag, ok := outbound["tag"].(string); ok && tag != "" {
+		_, _ = handlerClient.RemoveOutbound(ctx, &command.RemoveOutboundRequest{
+			Tag: tag,
+		})
+		// 忽略删除错误，因为 tag 可能不存在
+	}
+
 	_, err = handlerClient.AddOutbound(ctx, &command.AddOutboundRequest{
 		Outbound: rawConfig,
 	})

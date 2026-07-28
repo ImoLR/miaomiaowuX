@@ -39,7 +39,7 @@ func (h *RemoteManageHandler) deployMasterProxy(ctx context.Context, server *sto
 	}
 
 	// 证书:主控该域名的证书;没有先触发自动签发,让用户稍后重试(签发是异步的)。
-	cert, certErr := h.repo.GetCertificateByDomain(ctx, rootDomain, server.ID)
+	cert, certErr := h.repo.FindDeployableCertByDomain(ctx, rootDomain, server.ID)
 	if certErr != nil || cert == nil || cert.CertPEM == "" || cert.KeyPEM == "" {
 		if h.certHandler != nil {
 			go h.certHandler.DeployAutoDeployCertificates(server.ID)

@@ -237,11 +237,16 @@ func (h *UserPermissionsHandler) UserGet(w http.ResponseWriter, r *http.Request)
 	usedSub, _ := h.repo.CountUserSubscribeFiles(ctx, username)
 	usedRouted, _ := h.repo.CountUserRoutedOutbounds(ctx, username)
 
+	// 覆写脚本总开关:普通用户读不到 /api/admin/system-settings/override-scripts(admin only),
+	// 侧边栏靠这个字段决定是否显示「覆写管理」入口。GetSystemConfig 返回值(非指针),出错即零值 false。
+	sysCfg, _ := h.repo.GetSystemConfig(ctx)
+
 	writeJSONResp(w, http.StatusOK, map[string]any{
 		"success":                 true,
 		"is_admin":                isAdmin,
 		"pages":                   cfg.Pages,
 		"routed_outbound_enabled": cfg.RoutedOutboundEnabled,
+		"enable_override_scripts": sysCfg.EnableOverrideScripts,
 		"quota": map[string]any{
 			"template":        map[string]int{"used": usedTpl, "max": cfg.QuotaTemplate},
 			"override":        map[string]int{"used": usedOvr, "max": cfg.QuotaOverride},

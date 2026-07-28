@@ -437,6 +437,7 @@ func main() {
 	mux.Handle("/api/admin/remote-servers/update", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.UpdateRemoteServer)))
 	mux.Handle("/api/admin/remote-servers/reorder", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.ReorderRemoteServers)))
 	mux.Handle("/api/admin/remote-servers/delete", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.DeleteRemoteServer)))
+	mux.Handle("/api/admin/remote-servers/sync-node-address", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.SyncNodeAddress)))
 	mux.Handle("/api/admin/check-same-ip", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.CheckSameIP)))
 
 	// 远程服务器公共端点（无管理员身份验证，基于令牌）
@@ -825,6 +826,10 @@ func main() {
 	xrayKeyGenHandler := handler.NewXrayKeyGeneratorHandler()
 	mux.Handle("/api/admin/xray/generate-keys", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayKeyGenHandler.GenerateKeys)))
 	mux.Handle("/api/admin/xray/generate-x25519", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayKeyGenHandler.GenerateX25519)))
+
+	// 高层 inbound 构建器:吃高层意图拼出完整入站(供 MCP/自动化,无需复刻前端配置逻辑)
+	buildInboundHandler := handler.NewBuildInboundHandler()
+	mux.Handle("/api/admin/xray/build-inbound", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(buildInboundHandler.HandleBuildInbound)))
 
 	// 系统设置 API（仅限管理员）
 	systemSettingsHandler := handler.NewSystemSettingsHandler(repo, cryptoConfig)

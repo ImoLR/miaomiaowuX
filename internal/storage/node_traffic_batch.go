@@ -30,13 +30,29 @@ func (r *TrafficRepository) UpsertNodeTrafficBatch(ctx context.Context, serverID
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	// 用 BEGIN IMMEDIATE 而不是默认 BeginTx(deferred):deferred 以读快照开始,首个 SELECT 取快照后
+	// 再 INSERT/UPDATE 升级写锁 —— 期间别的连接提交了写就报 SQLITE_BUSY_SNAPSHOT(517),而 busy_timeout
+	// **对 517 无效**,于是采集热路径持续刷 "database is locked"。IMMEDIATE 在事务开头就拿写锁:
+	// 根除"读快照后升级",写锁被占时按 busy_timeout(5s)等待而非立刻失败。与 UpsertTrafficBatch 同款修法。
+	// 手动 BEGIN/COMMIT 必须钉在同一条 conn 上(事务是连接级的),故用 db.Conn 取独占连接。
+	conn, err := r.db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("begin node traffic batch tx: %w", err)
+		return fmt.Errorf("acquire conn for node traffic batch: %w", err)
 	}
-	defer tx.Rollback()
+	defer conn.Close()
 
-	rows, err := tx.QueryContext(ctx,
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin immediate node traffic batch: %w", err)
+	}
+	committed := false
+	// 未提交则回滚,保证 conn 归还连接池前是干净状态。用 Background:即便 ctx 已取消,ROLLBACK 也要跑完。
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	rows, err := conn.QueryContext(ctx,
 		`SELECT id, tag, type, total_uplink, total_downlink, last_uplink, last_downlink FROM node_traffic WHERE server_id = ?`,
 		serverID)
 	if err != nil {
@@ -71,7 +87,7 @@ func (r *TrafficRepository) UpsertNodeTrafficBatch(ctx context.Context, serverID
 		}
 		e, ok := existing[it.Tag+"\x00"+it.Type]
 		if !ok {
-			if _, err := tx.ExecContext(ctx, insertStmt, serverID, it.Tag, it.Type, it.Uplink, it.Downlink); err != nil {
+			if _, err := conn.ExecContext(ctx, insertStmt, serverID, it.Tag, it.Type, it.Uplink, it.Downlink); err != nil {
 				return fmt.Errorf("insert node traffic %s/%s: %w", it.Tag, it.Type, err)
 			}
 			continue
@@ -92,9 +108,13 @@ func (r *TrafficRepository) UpsertNodeTrafficBatch(ctx context.Context, serverID
 			newTotalUp = e.totalUp
 			newTotalDown = e.totalDown
 		}
-		if _, err := tx.ExecContext(ctx, updateStmt, deltaUp, deltaDown, newTotalUp, newTotalDown, it.Uplink, it.Downlink, e.id); err != nil {
+		if _, err := conn.ExecContext(ctx, updateStmt, deltaUp, deltaDown, newTotalUp, newTotalDown, it.Uplink, it.Downlink, e.id); err != nil {
 			return fmt.Errorf("update node traffic %s/%s: %w", it.Tag, it.Type, err)
 		}
 	}
-	return tx.Commit()
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit node traffic batch: %w", err)
+	}
+	committed = true
+	return nil
 }

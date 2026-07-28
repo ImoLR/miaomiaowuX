@@ -415,7 +415,7 @@ func deployLocalNginxWithCert(domain string, cert *storage.Certificate) error {
 
 func deployCertToLocal(domain string, repo *storage.TrafficRepository) {
 	ctx := context.Background()
-	cert, err := repo.GetCertificateByDomain(ctx, domain, 0)
+	cert, err := repo.FindDeployableCertByDomain(ctx, domain, 0)
 	if err != nil || cert == nil || cert.CertPEM == "" || cert.KeyPEM == "" {
 		logger.Warn("[本机Nginx] 未找到域名证书，跳过证书部署", "domain", domain)
 		return

@@ -359,7 +359,7 @@ func (h *RemoteManageHandler) HandleSetupSSL(w http.ResponseWriter, r *http.Requ
 
 	certName := "_." + rootDomain
 	if h.certHandler != nil {
-		if cert, certErr := h.repo.GetCertificateByDomain(r.Context(), rootDomain, id); certErr == nil && cert != nil {
+		if cert, certErr := h.repo.FindDeployableCertByDomain(r.Context(), rootDomain, id); certErr == nil && cert != nil {
 			certName = certDeployFilename(cert.Domain)
 		}
 	}
@@ -384,7 +384,7 @@ func (h *RemoteManageHandler) HandleSetupSSL(w http.ResponseWriter, r *http.Requ
 	// 步骤 3：使用根域查找并部署通配符证书
 	certDeployed := false
 	if h.certHandler != nil {
-		cert, certErr := h.repo.GetCertificateByDomain(r.Context(), rootDomain, id)
+		cert, certErr := h.repo.FindDeployableCertByDomain(r.Context(), rootDomain, id)
 		if certErr == nil && cert != nil && cert.CertPEM != "" && cert.KeyPEM != "" {
 			certPath := fmt.Sprintf("/usr/local/nginx/cert/%s.pem", certDeployFilename(cert.Domain))
 			keyPath := fmt.Sprintf("/usr/local/nginx/cert/%s.key", certDeployFilename(cert.Domain))

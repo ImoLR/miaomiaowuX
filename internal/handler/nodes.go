@@ -1114,9 +1114,27 @@ func (h *nodesHandler) handleNodeURI(w http.ResponseWriter, r *http.Request, idS
 	if t, _ := m["type"].(string); t == "socks" {
 		m["type"] = "socks5"
 	}
+	proxyType, _ := m["type"].(string)
+	// snell 是 Surge 私有协议,没有标准分享 URI(URIProducer 对它走 default 直接跳过、产出空串)。
+	// 其唯一能被客户端(Surge/小火箭)识别的分享文本是配置行,故改用 Surge producer 输出配置行。
+	if proxyType == "snell" {
+		line, serr := substore.NewSurgeProducer().ProduceOne(substore.Proxy(m), "", nil)
+		if serr != nil || strings.TrimSpace(line) == "" {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("生成 snell 配置行失败: %v", serr))
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"uri": line})
+		return
+	}
 	uri, perr := substore.NewURIProducer().ProduceOne(substore.Proxy(m))
-	if perr != nil || strings.TrimSpace(uri) == "" {
+	if perr != nil {
 		writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("生成 URI 失败: %v", perr))
+		return
+	}
+	if strings.TrimSpace(uri) == "" {
+		// perr 为 nil 却产出空串:说明该协议无分享 URI(被 URIProducer 的 default 分支跳过)。
+		// 给出明确协议名,避免历史上的 "生成 URI 失败: <nil>" 迷惑报错。
+		writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("该协议(%s)暂不支持生成分享 URI", proxyType))
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"uri": uri})

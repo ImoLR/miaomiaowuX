@@ -40,6 +40,29 @@ const (
 	ruleTemplateMaxFileSize = 2 << 20 // 单个模板文件最大 2MB
 )
 
+// settingUserHiddenRuleTemplates 存管理员配置的「对普通用户隐藏的内置(无归属)模板」文件名 JSON 数组。
+// 内置模板默认对所有用户可见;管理员把某个加入此列表后,普通用户列表里就不再显示它(不影响管理员)。
+const settingUserHiddenRuleTemplates = "user_hidden_rule_templates"
+
+// loadHiddenRuleTemplates 读隐藏集(文件名 → true)。空 / 解析失败均返回空集(=全部内置可见)。
+func (h *RuleTemplatesHandler) loadHiddenRuleTemplates(r *http.Request) map[string]bool {
+	set := map[string]bool{}
+	if h.repo == nil {
+		return set
+	}
+	raw, _ := h.repo.GetSystemSetting(r.Context(), settingUserHiddenRuleTemplates)
+	if strings.TrimSpace(raw) == "" {
+		return set
+	}
+	var arr []string
+	if json.Unmarshal([]byte(raw), &arr) == nil {
+		for _, fn := range arr {
+			set[fn] = true
+		}
+	}
+	return set
+}
+
 // isRuleTemplateFile 判断文件名是否为受支持的模板文件。
 // .yaml/.yml → Clash V3 模板;.conf → Surge 模板(前端按扩展名区分类型与编辑器)。
 func isRuleTemplateFile(name string) bool {
@@ -80,6 +103,8 @@ func (h *RuleTemplatesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		h.handleUploadTemplate(w, r)
+	case path == "/visibility":
+		h.handleVisibility(w, r)
 	case path == "/rename":
 		// 重命名模板
 		if r.Method != http.MethodPost {
@@ -115,6 +140,66 @@ func (h *RuleTemplatesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// handleVisibility 管理员配置「哪些内置(无归属)模板对普通用户可见」。仅管理员可调。
+// GET  → { builtins: [...全部内置模板文件名], hidden: [...当前对用户隐藏的] }
+// PUT  → body { hidden: [...] } 覆盖隐藏集。
+func (h *RuleTemplatesHandler) handleVisibility(w http.ResponseWriter, r *http.Request) {
+	username := auth.UsernameFromContext(r.Context())
+	if !userIsAdmin(r.Context(), h.repo, username) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		entries, err := os.ReadDir("rule_templates")
+		if err != nil {
+			http.Error(w, "Failed to read templates directory", http.StatusInternalServerError)
+			return
+		}
+		allOwners, _ := h.repo.ListRuleTemplateOwners(r.Context())
+		builtins := make([]string, 0)
+		for _, e := range entries {
+			if e.IsDir() || !isRuleTemplateFile(e.Name()) {
+				continue
+			}
+			// 只列内置(无归属)模板 —— 用户私有模板本就只对其本人可见,不在此配置范围。
+			if _, owned := allOwners[e.Name()]; !owned {
+				builtins = append(builtins, e.Name())
+			}
+		}
+		hidden := h.loadHiddenRuleTemplates(r)
+		hiddenArr := make([]string, 0, len(hidden))
+		for fn := range hidden {
+			hiddenArr = append(hiddenArr, fn)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"builtins": builtins, "hidden": hiddenArr})
+
+	case http.MethodPut:
+		var req struct {
+			Hidden []string `json:"hidden"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		if req.Hidden == nil {
+			req.Hidden = []string{}
+		}
+		val, _ := json.Marshal(req.Hidden)
+		if err := h.repo.SetSystemSetting(r.Context(), settingUserHiddenRuleTemplates, string(val)); err != nil {
+			http.Error(w, "save failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (h *RuleTemplatesHandler) handleListTemplates(w http.ResponseWriter, r *http.Request) {
 	templatesDir := "rule_templates"
 
@@ -145,13 +230,16 @@ func (h *RuleTemplatesHandler) handleListTemplates(w http.ResponseWriter, r *htt
 	visibleTemplates := templates
 	visibleOwners := allOwners
 	if !isAdmin {
+		hidden := h.loadHiddenRuleTemplates(r)
 		visibleOwners = make(map[string]string, 1)
 		filtered := make([]string, 0, len(templates))
 		for _, fn := range templates {
 			owner, hasOwner := allOwners[fn]
 			if !hasOwner {
-				// 无归属记录 = 内置/公共模板,所有人可见
-				filtered = append(filtered, fn)
+				// 无归属记录 = 内置/公共模板:默认所有人可见,但管理员可在「模板可见性」里隐藏。
+				if !hidden[fn] {
+					filtered = append(filtered, fn)
+				}
 				continue
 			}
 			if owner == username {

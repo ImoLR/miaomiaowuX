@@ -30,16 +30,39 @@ jobs:
       URL: ${{ github.event.release.html_url }}
       PROJECT: miaomiaowux
     steps:
-      - name: Download release assets (mmwx-*)
+      - name: Download release assets (mmwx-*) — 等 build.yml 传完再下,避免竞态
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p dist
-          gh release download "$TAG" --repo "${{ github.repository }}" --pattern 'mmwx-*' --dir dist
+          # publish-cdn 与 build.yml 都由 release:published 触发,本步可能抢在 build.yml 上传二进制
+          # 之前跑 → "no assets to download" 直接失败(R2 一片空)。这里重试等待资产出现(最多 ~10min)。
+          for i in $(seq 1 40); do
+            if gh release download "$TAG" --repo "${{ github.repository }}" --pattern 'mmwx-*' --dir dist 2>/dev/null; then
+              echo "第 $i 次尝试:资产已下载"
+              break
+            fi
+            echo "第 $i 次尝试:资产还没就绪,等 15s 再试..."
+            sleep 15
+          done
           ls -la dist
+          if ! ls dist/mmwx-* >/dev/null 2>&1; then
+            echo "::error::等待超时:release $TAG 仍无 mmwx-* 资产(build.yml 可能失败或资产命名变了)"
+            exit 1
+          fi
 
       - name: Generate version.json
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # 手动补传(workflow_dispatch)时没有 release event,NOTES/URL 为空 → 从 gh 补取,
+          # 让 version.json 的 notes/html_url 也正确(面板"查看详情"跳转用)。
+          if [ -z "${NOTES:-}" ]; then
+            NOTES=$(gh release view "$TAG" --repo "${{ github.repository }}" --json body --jq '.body' 2>/dev/null || echo "")
+          fi
+          if [ -z "${URL:-}" ]; then
+            URL=$(gh release view "$TAG" --repo "${{ github.repository }}" --json url --jq '.url' 2>/dev/null || echo "")
+          fi
           # 用 jq -n + 环境变量构造,避免 release body 里的引号/换行破坏 JSON 或注入
           jq -n \
             --arg version "$TAG" \

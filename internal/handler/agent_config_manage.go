@@ -217,7 +217,11 @@ func (h *XrayServerHandler) BuildRemoteServersList(ctx context.Context) RemoteSe
 			RemoteServer: server,
 			Inbounds:     []RemoteServerInboundInfo{},
 		}
-		if h.wsHandler != nil {
+		if server.IsFederated {
+			// 分享服务器:消费方不直连 agent(无 WS 会话,server.Token 是占位),原加密探测恒 false 会误报"不安全"。
+			// 实际消费方↔拥有方主控这一跳走 HTTPS + 令牌派生 ECDH,视为已加密。
+			extended.Encrypted = true
+		} else if h.wsHandler != nil {
 			extended.Encrypted = h.wsHandler.IsConnectionEncrypted(server.Token)
 			extended.WsConnected = h.wsHandler.IsConnected(server.Token)
 		}
@@ -673,6 +677,56 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 }
 
 // 通过 ID 删除远程服务器
+// SyncNodeAddress 手动把指定服务器下所有节点的 clash server 地址校正为服务器当前地址。
+// 换机 / IP 漂移后,心跳与入站同步两条自动刷新都按 original_server=服务器名 匹配刷新;但个别场景
+// (某次 IP 变化触发被错过、或历史节点)可能没被刷到,导致「服务管理显示新 IP、节点生成仍是旧 IP」。
+// 本端点给管理员一键强制校正:v4/域名节点刷到 chooseClashServerHost(Domain→PullAddress域名→IPAddress),
+// v6 节点刷到 IPAddressV6。仍按 original_server 匹配(与自动刷新同口径,不误伤别的服务器的节点)。
+func (h *XrayServerHandler) SyncNodeAddress(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+	if r.Method != "POST" {
+		stdhttp.Error(w, "Method not allowed", stdhttp.StatusMethodNotAllowed)
+		return
+	}
+
+	var req RemoteServerDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID <= 0 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: "无效的服务器ID"})
+		return
+	}
+
+	ctx := r.Context()
+	server, err := h.repo.GetRemoteServer(ctx, req.ID)
+	if err != nil || server == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: "服务器不存在"})
+		return
+	}
+
+	var total int64
+	host := chooseClashServerHost(server)
+	if host != "" {
+		if n, e := h.repo.RefreshNodesServerAddress(ctx, server.Name, host); e != nil {
+			log.Printf("[Sync Node Address] v4 refresh failed for %s: %v", server.Name, e)
+		} else {
+			total += n
+		}
+	}
+	if v6 := v6RefreshTarget(server); v6 != "" {
+		if n, e := h.repo.RefreshNodesServerAddressV6(ctx, server.Name, v6); e != nil {
+			log.Printf("[Sync Node Address] v6 refresh failed for %s: %v", server.Name, e)
+		} else {
+			total += n
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(RemoteServerResponse{
+		Success: true,
+		Message: fmt.Sprintf("已同步 %d 个节点地址到 %s", total, host),
+	})
+}
+
 func (h *XrayServerHandler) DeleteRemoteServer(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 	if r.Method != "POST" {
 		stdhttp.Error(w, "Method not allowed", stdhttp.StatusMethodNotAllowed)
@@ -914,6 +968,29 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 				Message: fmt.Sprintf("更新拉取配置失败: %s", err.Error()),
 			})
 			return
+		}
+	}
+
+	// 锁定入口 IP 变更时,立即把已存在节点的 clash server 校正到锁定后的 effective host。
+	// 放在 pull_address 落库之后:确保 GetRemoteServer 读到的是本次刚写入的新地址,
+	// 否则"同时改服务器地址 + 勾锁定"会刷到旧地址。不触发时(req.LockEntryIP==nil)跳过,
+	// 保持与旧行为一致 —— 只有前端明确提交了锁定开关才动节点地址。
+	if req.LockEntryIP != nil {
+		if latest, gerr := h.repo.GetRemoteServer(ctx, req.ID); gerr == nil && latest != nil {
+			if host := chooseClashServerHost(latest); host != "" {
+				if n, e := h.repo.RefreshNodesServerAddress(ctx, latest.Name, host); e != nil {
+					log.Printf("[Remote Server] lock-entry v4 refresh for %s failed: %v", latest.Name, e)
+				} else if n > 0 {
+					log.Printf("[Remote Server] lock-entry: refreshed %d node(s) clash.server → %s for %s", n, host, latest.Name)
+				}
+			}
+			if v6 := v6RefreshTarget(latest); v6 != "" {
+				if n, e := h.repo.RefreshNodesServerAddressV6(ctx, latest.Name, v6); e != nil {
+					log.Printf("[Remote Server] lock-entry v6 refresh for %s failed: %v", latest.Name, e)
+				} else if n > 0 {
+					log.Printf("[Remote Server] lock-entry: refreshed %d v6 node(s) clash.server → %s for %s", n, v6, latest.Name)
+				}
+			}
 		}
 	}
 

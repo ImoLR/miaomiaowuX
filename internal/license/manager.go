@@ -7,6 +7,7 @@ import (
 	"log"
 	"miaomiaowux/internal/version"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -285,6 +286,11 @@ func (m *Manager) loadPersistedStatus(ctx context.Context) {
 		log.Printf("[license] failed to load persisted status: %v", err)
 		return
 	}
+	// 不信任持久化的 HardRevoked:硬吊销是「服务端明确否决」的实时状态,重启后必须
+	// 重新向服务端确认,而不是拿旧值当真 —— 否则历史上因机器码变化 / 服务端抖动误置的
+	// HardRevoked 会跨重启一直停服,永远无法自愈。清成 false 后先走 grace(LastCheck 保留),
+	// 由启动后的 activate/heartbeat 重新判定:真吊销会秒级重新置位,可恢复的则自动重绑。
+	status.HardRevoked = false
 	m.mu.Lock()
 	m.status = status
 	m.mu.Unlock()
@@ -374,10 +380,14 @@ func (m *Manager) heartbeat(ctx context.Context) {
 	}
 	defer resp.Body.Close()
 
-	m.parseResponse(ctx, resp, nonce)
+	if m.parseResponse(ctx, resp, nonce) {
+		// 机器码变化 / 解绑后未重绑 → 心跳循环本身不会重绑,主动发起一次 activate 自愈。
+		// activate 内部同样走 parseResponse,但不理会其 needReactivate 返回值,故无递归风暴。
+		go m.activate(ctx)
+	}
 }
 
-func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce string) {
+func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce string) (needReactivate bool) {
 	// 非 2xx(尤其 429 限流 / 5xx / 502 等)是"临时故障",不是"服务器明确否决"。
 	// 直接 return:不更新 status、不 HardRevoked,交给 IsValid 的 24h grace 容忍。
 	// 否则 license 服务器一抖动(限流/重启/网关波动)就会把本机 PRO 功能全灭。
@@ -437,20 +447,31 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 
 	m.status.Valid = result.Valid
 	m.status.Error = result.Error
-	m.status.LastCheck = time.Now()
 
 	if result.Valid {
-		// 服务器明确"有效"且验签通过 → 清除 HardRevoked(用于解绑后续绑生效场景)。
+		// 服务器明确"有效"且验签通过 → 清除 HardRevoked(用于解绑后续绑生效场景),
+		// 并刷新 grace 基准时间 LastCheck(只有"确认有效"才续 grace)。
 		m.status.HardRevoked = false
+		m.status.LastCheck = time.Now()
 		m.status.MaxServers = result.MaxServers
 		m.status.ExpiresAt = result.ExpiresAt
 		if hasPlan {
 			m.status.Plan = &plan
 		}
+	} else if isRebindableError(result.Error) {
+		// 「绑定层面」可恢复失效:机器码变化(machine mismatch)或解绑后未重绑
+		// (license not activated)。不同于过期/吊销 —— 重新 activate 一次即可恢复
+		// (覆盖激活开时服务端自动换绑)。因此不置 HardRevoked、保留 24h grace 不立即停服,
+		// 并置 needReactivate 让心跳侧异步发起一次 activate 自愈重绑。
+		//
+		// 关键:这里**不刷新 LastCheck**。grace 自最后一次 valid=true 起真实倒计时,
+		// 24h 内仍重绑不上(如覆盖激活关且机器码永久变了)→ grace 到期自然停服,
+		// 覆盖激活关时的防盗用边界得以保留,不会因每 5 分钟心跳把 grace 无限续命。
+		m.status.HardRevoked = false
+		needReactivate = true
+		log.Printf("[license] rebindable invalid (%s) — keeping grace, will re-activate", result.Error)
 	} else {
-		// 收到了 HTTP 响应但 valid=false → 服务器明确否决(unbind / revoked / wrong machine_id 等),
-		// 立即失效,不走 24h grace。这是跟"网络故障"的本质区别 —— 网络故障在 heartbeat() 早就 return 了,
-		// 走不到这里。
+		// 真正失效:过期 / 吊销 / 无效 key → 立即硬吊销,不走 24h grace。
 		m.status.HardRevoked = true
 		log.Printf("[license] HARD REVOKED by server: %s", result.Error)
 	}
@@ -482,6 +503,22 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 				go lostCb(f)
 			}
 		}
+	}
+	return needReactivate
+}
+
+// isRebindableError 判断服务端 valid=false 的 error 是否属于「重新激活即可恢复的绑定问题」:
+//   - "machine mismatch"      机器码变了(Docker 卷/迁移/重装),覆盖激活开时 activate 会自动换绑
+//   - "license not activated" 被解绑后尚未重绑,activate 会重新占用该 key
+//
+// 这两类不该按硬吊销立即停服,而应保留 grace 并自动重激活。其余(过期/吊销/无效 key)返回 false,
+// 仍走硬吊销。字符串与 license 服务端 validate.go 的返回值一一对应。
+func isRebindableError(msg string) bool {
+	switch strings.ToLower(strings.TrimSpace(msg)) {
+	case "machine mismatch", "license not activated":
+		return true
+	default:
+		return false
 	}
 }
 

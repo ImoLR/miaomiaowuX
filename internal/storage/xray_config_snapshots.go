@@ -96,16 +96,28 @@ func (r *TrafficRepository) GetXraySnapshotByID(ctx context.Context, id int64) (
 func (r *TrafficRepository) UpsertCurrentXraySnapshot(ctx context.Context, serverID int64, configJSON, source string) (*ServerXrayConfigSnapshot, error) {
 	hash := HashXrayConfig(configJSON)
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	// BEGIN IMMEDIATE 避免 DEFERRED 读快照升级写锁时触发 SQLITE_BUSY_SNAPSHOT(517)。
+	// 手动 BEGIN/COMMIT 必须在同一条 conn 上,故用 db.Conn 取独占连接。
+	conn, err := r.db.Conn(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("acquire conn for xray snapshot upsert: %w", err)
 	}
-	defer tx.Rollback()
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return nil, fmt.Errorf("begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
 
 	// 查现行 current
 	var curID int64
 	var curHash string
-	err = tx.QueryRowContext(ctx,
+	err = conn.QueryRowContext(ctx,
 		`SELECT id, config_hash FROM server_xray_config_snapshots
 		 WHERE server_id = ? AND status = ? ORDER BY created_at DESC LIMIT 1`,
 		serverID, XraySnapshotStatusCurrent,
@@ -117,15 +129,16 @@ func (r *TrafficRepository) UpsertCurrentXraySnapshot(ctx context.Context, serve
 
 	if hasCur && curHash == hash {
 		// 无需变更,直接返回现行 current
-		if err := tx.Commit(); err != nil {
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 			return nil, fmt.Errorf("commit: %w", err)
 		}
+		committed = true
 		return r.GetCurrentXraySnapshot(ctx, serverID)
 	}
 
 	// 旧 current 置 old
 	if hasCur {
-		if _, err := tx.ExecContext(ctx,
+		if _, err := conn.ExecContext(ctx,
 			`UPDATE server_xray_config_snapshots SET status = ? WHERE id = ?`,
 			XraySnapshotStatusOld, curID,
 		); err != nil {
@@ -134,7 +147,7 @@ func (r *TrafficRepository) UpsertCurrentXraySnapshot(ctx context.Context, serve
 	}
 
 	// 新 current
-	res, err := tx.ExecContext(ctx,
+	res, err := conn.ExecContext(ctx,
 		`INSERT INTO server_xray_config_snapshots (server_id, config_json, config_hash, source, status)
 		 VALUES (?, ?, ?, ?, ?)`,
 		serverID, configJSON, hash, source, XraySnapshotStatusCurrent,
@@ -144,9 +157,10 @@ func (r *TrafficRepository) UpsertCurrentXraySnapshot(ctx context.Context, serve
 	}
 	id, _ := res.LastInsertId()
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
+	committed = true
 	return &ServerXrayConfigSnapshot{
 		ID: id, ServerID: serverID, ConfigJSON: configJSON, ConfigHash: hash,
 		Source: source, Status: XraySnapshotStatusCurrent,
@@ -159,15 +173,25 @@ func (r *TrafficRepository) UpsertCurrentXraySnapshot(ctx context.Context, serve
 func (r *TrafficRepository) WritePendingXrayRecovery(ctx context.Context, serverID int64, configJSON, source string) (bool, error) {
 	hash := HashXrayConfig(configJSON)
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	conn, err := r.db.Conn(ctx)
 	if err != nil {
-		return false, fmt.Errorf("begin tx: %w", err)
+		return false, fmt.Errorf("acquire conn for pending recovery: %w", err)
 	}
-	defer tx.Rollback()
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return false, fmt.Errorf("begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
 
 	// 若与 current hash 一致 — 上报配置就是主控记的那一份,无需 pending(也无需告警)
 	var curHash string
-	err = tx.QueryRowContext(ctx,
+	err = conn.QueryRowContext(ctx,
 		`SELECT config_hash FROM server_xray_config_snapshots
 		 WHERE server_id = ? AND status = ? ORDER BY created_at DESC LIMIT 1`,
 		serverID, XraySnapshotStatusCurrent,
@@ -176,14 +200,15 @@ func (r *TrafficRepository) WritePendingXrayRecovery(ctx context.Context, server
 		return false, fmt.Errorf("query current: %w", err)
 	}
 	if curHash == hash && curHash != "" {
-		if err := tx.Commit(); err != nil {
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 			return false, fmt.Errorf("commit: %w", err)
 		}
+		committed = true
 		return false, nil
 	}
 
 	// 删除旧 pending
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`DELETE FROM server_xray_config_snapshots WHERE server_id = ? AND status = ?`,
 		serverID, XraySnapshotStatusPendingRecovery,
 	); err != nil {
@@ -191,7 +216,7 @@ func (r *TrafficRepository) WritePendingXrayRecovery(ctx context.Context, server
 	}
 
 	// 插新 pending
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`INSERT INTO server_xray_config_snapshots (server_id, config_json, config_hash, source, status)
 		 VALUES (?, ?, ?, ?, ?)`,
 		serverID, configJSON, hash, source, XraySnapshotStatusPendingRecovery,
@@ -199,9 +224,10 @@ func (r *TrafficRepository) WritePendingXrayRecovery(ctx context.Context, server
 		return false, fmt.Errorf("insert pending: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return false, fmt.Errorf("commit: %w", err)
 	}
+	committed = true
 	return true, nil
 }
 
@@ -220,14 +246,24 @@ func (r *TrafficRepository) DiscardPendingXrayRecovery(ctx context.Context, serv
 // AcceptPendingXrayRecovery 用户选了"接受 agent 当前配置": 旧 current 置 old,pending → current。
 // 同一事务里完成,失败回滚,pending 与 current 都不动。
 func (r *TrafficRepository) AcceptPendingXrayRecovery(ctx context.Context, serverID int64) error {
-	tx, err := r.db.BeginTx(ctx, nil)
+	conn, err := r.db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return fmt.Errorf("acquire conn for accept pending: %w", err)
 	}
-	defer tx.Rollback()
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
 
 	var pendingID int64
-	err = tx.QueryRowContext(ctx,
+	err = conn.QueryRowContext(ctx,
 		`SELECT id FROM server_xray_config_snapshots
 		 WHERE server_id = ? AND status = ? ORDER BY created_at DESC LIMIT 1`,
 		serverID, XraySnapshotStatusPendingRecovery,
@@ -240,7 +276,7 @@ func (r *TrafficRepository) AcceptPendingXrayRecovery(ctx context.Context, serve
 	}
 
 	// 旧 current → old
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`UPDATE server_xray_config_snapshots SET status = ?
 		 WHERE server_id = ? AND status = ?`,
 		XraySnapshotStatusOld, serverID, XraySnapshotStatusCurrent,
@@ -249,16 +285,17 @@ func (r *TrafficRepository) AcceptPendingXrayRecovery(ctx context.Context, serve
 	}
 
 	// pending → current,同时把 source 标记为 manual_accept
-	if _, err := tx.ExecContext(ctx,
+	if _, err := conn.ExecContext(ctx,
 		`UPDATE server_xray_config_snapshots SET status = ?, source = ? WHERE id = ?`,
 		XraySnapshotStatusCurrent, XraySnapshotSourceManualAccept, pendingID,
 	); err != nil {
 		return fmt.Errorf("promote pending: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit: %w", err)
 	}
+	committed = true
 	return nil
 }
 

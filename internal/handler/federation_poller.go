@@ -142,6 +142,14 @@ func applyFederationInfo(ctx context.Context, repo *storage.TrafficRepository, s
 		_ = repo.UpdateRemoteServerXrayMode(ctx, serverID, mode)
 	}
 
+	// 透传拥有方的 v6 网络信息(ip_address_v6 / domain / domain_v6 / ipv6_enabled),
+	// 否则分享服务器无 v6、其节点无法走 IPv6。空值不覆盖旧值。
+	ipv6, _ := info["ip_address_v6"].(string)
+	domain, _ := info["domain"].(string)
+	domainV6, _ := info["domain_v6"].(string)
+	ipv6Enabled, _ := info["ipv6_enabled"].(bool)
+	_ = repo.UpdateRemoteServerV6Info(ctx, serverID, ipv6, domain, domainV6, ipv6Enabled)
+
 	// 拥有方报告 connected 时刷新心跳/状态;联邦消费侧也补上离线→在线的 TG 通知
 	if st, _ := info["status"].(string); st == "connected" {
 		prev, name, ip, prevNotified, _ := repo.UpdateRemoteServerLastActivity(ctx, serverID)

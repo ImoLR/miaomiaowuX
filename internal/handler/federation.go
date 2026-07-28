@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -123,6 +124,20 @@ func (h *FederationHandler) handleManage(w http.ResponseWriter, r *http.Request,
 		body = b
 	}
 
+	// 作用域校验:默认(allow_manage_xray=false)只让接收方管自己经本分享建的入站,
+	// 拒绝拉全量入站/配置反推其他用户链接。allow_manage_xray=true 则全权放行。
+	share, sErr := h.repo.GetSharedServerByTokenHash(r.Context(), hashShareToken(fedToken(r)))
+	if sErr != nil {
+		writeError(w, http.StatusUnauthorized, errors.New("invalid or revoked share token"))
+		return
+	}
+	if !share.AllowManageXray {
+		if deny := h.scopeFederationCommand(r.Context(), share.ID, req.Method, req.Path, body); deny != "" {
+			writeError(w, http.StatusForbidden, errors.New(deny))
+			return
+		}
+	}
+
 	result, ferr := h.remoteManage.ForwardToAgent(r.Context(), serverID, req.Method, req.Path, body)
 	if ferr != nil {
 		writeError(w, http.StatusBadGateway, ferr)
@@ -130,6 +145,12 @@ func (h *FederationHandler) handleManage(w http.ResponseWriter, r *http.Request,
 	}
 	// 联邦入站溯源:接收方经本分享加/删入站时记录/删除,供吊销分享时删 agent 入站(让接收方节点随之失效)。
 	h.trackFederationInbound(r, serverID, req.Method, req.Path, body)
+
+	// 作用域下:GET 入站列表只回本分享自己建的入站,隐藏他人入站(防反推链接)。
+	if !share.AllowManageXray && req.Method == http.MethodGet && stripQuery(req.Path) == "/api/child/inbounds" {
+		result = h.filterInboundsForShare(r.Context(), share.ID, result)
+	}
+
 	if session != nil {
 		if enc, eerr := session.Encrypt(result); eerr == nil {
 			w.Header().Set("X-Encrypted", "1")
@@ -182,6 +203,93 @@ func (h *FederationHandler) trackFederationInbound(r *http.Request, serverID int
 	case "remove":
 		_ = h.repo.UnrecordSharedInbound(r.Context(), share.ID, tag)
 	}
+}
+
+// stripQuery 去掉 path 的 querystring。
+func stripQuery(path string) string {
+	if i := strings.Index(path, "?"); i >= 0 {
+		return path[:i]
+	}
+	return path
+}
+
+// scopeFederationCommand 作用域校验:allow_manage_xray=false 的分享只允许接收方管理自己经本分享建的入站。
+// 返回非空 = 拒绝原因。允许:GET /api/child/inbounds(结果再过滤)、POST /api/child/inbounds 的 add;
+// remove/update 仅限本分享自己的 tag;其余 /api/child/*(xray/config、system-config、outbounds 等)一律拒绝。
+func (h *FederationHandler) scopeFederationCommand(ctx context.Context, shareID int64, method, path string, body []byte) string {
+	switch stripQuery(path) {
+	case "/api/child/inbounds":
+		if method == http.MethodGet {
+			return "" // 允许,响应稍后按本分享 tag 过滤
+		}
+		if method == http.MethodPost {
+			var b struct {
+				Action  string `json:"action"`
+				Tag     string `json:"tag"`
+				Inbound struct {
+					Tag string `json:"tag"`
+				} `json:"inbound"`
+			}
+			_ = json.Unmarshal(body, &b)
+			switch strings.ToLower(b.Action) {
+			case "", "add":
+				return "" // 加自己的入站,允许(由 trackFederationInbound 溯源)
+			default: // remove / update:tag 必须属于本分享
+				tag := b.Tag
+				if tag == "" {
+					tag = b.Inbound.Tag
+				}
+				tags, _ := h.repo.ListSharedInboundTags(ctx, shareID)
+				for _, t := range tags {
+					if t == tag {
+						return ""
+					}
+				}
+				return "此分享只能操作自己创建的入站"
+			}
+		}
+		return "此分享无权进行该操作"
+	default:
+		return "此分享无权查看/修改完整 Xray 配置(仅可管理自己创建的入站);如需完整权限请让拥有方在分享时勾选允许"
+	}
+}
+
+// filterInboundsForShare 把 GET /api/child/inbounds 的响应过滤到只含本分享自己建的入站,隐藏他人入站。
+// 解析失败/出错时保守返回"空入站列表",绝不泄露原始全量。
+func (h *FederationHandler) filterInboundsForShare(ctx context.Context, shareID int64, result []byte) []byte {
+	empty, _ := json.Marshal(map[string]any{"success": true, "inbounds": []any{}})
+	tags, err := h.repo.ListSharedInboundTags(ctx, shareID)
+	if err != nil {
+		return empty
+	}
+	allow := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		allow[t] = true
+	}
+	var obj map[string]any
+	if json.Unmarshal(result, &obj) != nil {
+		return empty
+	}
+	arr, ok := obj["inbounds"].([]any)
+	if !ok {
+		return empty
+	}
+	filtered := make([]any, 0, len(arr))
+	for _, it := range arr {
+		m, _ := it.(map[string]any)
+		if m == nil {
+			continue
+		}
+		if tag, _ := m["tag"].(string); allow[tag] {
+			filtered = append(filtered, it)
+		}
+	}
+	obj["inbounds"] = filtered
+	out, merr := json.Marshal(obj)
+	if merr != nil {
+		return empty
+	}
+	return out
 }
 
 // fedToken 取分享令牌(与 authShare 一致),用作会话缓存键。
@@ -258,10 +366,15 @@ func (h *FederationHandler) handleServerInfo(w http.ResponseWriter, r *http.Requ
 	}
 	trafficUsed, _ := h.repo.GetServerTrafficUsed(r.Context(), serverID)
 	resp := map[string]any{
-		"name":                   srv.Name,
-		"status":                 srv.Status,
-		"ip_address":             srv.IPAddress,
-		"xray_mode":              srv.XrayMode,
+		"name":       srv.Name,
+		"status":     srv.Status,
+		"ip_address": srv.IPAddress,
+		// v6 网络信息:透传给消费方,让分享服务器也能建 IPv6 节点(消费方本地无 agent、拿不到这些)。
+		"ip_address_v6": srv.IPAddressV6,
+		"ipv6_enabled":  srv.IPv6Enabled,
+		"domain":        srv.Domain,
+		"domain_v6":     srv.DomainV6,
+		"xray_mode":     srv.XrayMode,
 		"traffic_limit":          srv.TrafficLimit,
 		"traffic_reset_day":      srv.TrafficResetDay,
 		"traffic_used":           trafficUsed + srv.TrafficUsedOffset,

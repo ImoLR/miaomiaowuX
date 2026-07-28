@@ -22,7 +22,7 @@ func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *
 	}
 
 	certName := "_." + rootDomain
-	if cert, certErr := h.repo.GetCertificateByDomain(ctx, rootDomain, server.ID); certErr == nil && cert != nil {
+	if cert, certErr := h.repo.FindDeployableCertByDomain(ctx, rootDomain, server.ID); certErr == nil && cert != nil {
 		certName = certDeployFilename(cert.Domain)
 	}
 	// 统一渲染:伪装站 location / + 该 server 现有 ws 入站的 location
@@ -56,7 +56,7 @@ func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *
 	log.Printf("[DeployFallback] Deployed xray config to server %d (%s)", server.ID, server.Name)
 
 	if h.certHandler != nil {
-		cert, certErr := h.repo.GetCertificateByDomain(ctx, rootDomain, server.ID)
+		cert, certErr := h.repo.FindDeployableCertByDomain(ctx, rootDomain, server.ID)
 		if certErr == nil && cert != nil && cert.CertPEM != "" && cert.KeyPEM != "" {
 			payload := WSCertDeployPayload{
 				Domain:   rootDomain,

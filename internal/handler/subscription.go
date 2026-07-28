@@ -794,6 +794,10 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	//     跟"流量信息"页一致,避免把全平台所有服务器流量塞进 subscription-userinfo。
 	//   - admin / 无套餐 / 找不到用户 → 沿用 stats_server_ids 那套老逻辑。
 	remoteTrafficLimit, remoteTrafficUsed := int64(0), int64(0)
+	// subExpire:订阅创建者的套餐到期日,用于 subscription-userinfo 的 expire。
+	// 普通用户绑套餐时取其 PackageEndDate(可能为 nil=永久);admin/无套餐/找不到用户时
+	// 保持 nil → buildSubscriptionHeader 输出长期占位(2099-12-31)。
+	var subExpire *time.Time
 	if hasSubscribeFile && h.repo != nil {
 		creator := strings.TrimSpace(subscribeFile.CreatedBy)
 		usedPackageScope := false
@@ -806,6 +810,7 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 					if billable, terr := h.repo.GetUserBillableTraffic(r.Context(), creator); terr == nil {
 						remoteTrafficUsed = billable
 					}
+					subExpire = user.PackageEndDate
 					usedPackageScope = true
 				}
 			}
@@ -839,7 +844,7 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	totalTrafficLimit := externalTrafficLimit + remoteTrafficLimit
 	totalTrafficUsed := externalTrafficUsed + remoteTrafficUsed
 	if totalTrafficLimit > 0 {
-		headerValue := buildSubscriptionHeader(totalTrafficLimit, totalTrafficUsed)
+		headerValue := buildSubscriptionHeader(totalTrafficLimit, totalTrafficUsed, subExpire)
 		w.Header().Set("subscription-userinfo", headerValue)
 	}
 	w.Header().Set("profile-update-interval", "24")
@@ -1129,10 +1134,29 @@ func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscrib
 	return []byte(result), nil
 }
 
-func buildSubscriptionHeader(totalLimit, totalUsed int64) string {
+// longTermExpireUnix 是"长期/永久订阅"在 subscription-userinfo 里输出的 expire 时间戳。
+// 小火箭等客户端把 expire 缺失或 expire=0 当作无效(显示 1970 或直接忽略),无法表达
+// "长期有效";业界通行做法是给一个远期时间(此处 2099-12-31 23:59:59 UTC),客户端会
+// 明确显示为该到期日,语义上等同"长期"。用 time.Date 构造避免手写时间戳算错。
+var longTermExpireUnix = time.Date(2099, 12, 31, 23, 59, 59, 0, time.UTC).Unix()
+
+// appendExpire 给 subscription-userinfo 追加 expire 字段。
+//   - endDate 非 nil 且在未来 → 输出实际到期时间戳
+//   - endDate 为 nil(永久)或已过期占位场景 → 输出 longTermExpireUnix(2099-12-31)
+//
+// 这样无论套餐订阅还是订阅文件、无论有无到期日,小火箭都能拿到一个有效 expire。
+func appendExpire(info string, endDate *time.Time) string {
+	exp := longTermExpireUnix
+	if endDate != nil {
+		exp = endDate.Unix()
+	}
+	return info + fmt.Sprintf("; expire=%d", exp)
+}
+
+func buildSubscriptionHeader(totalLimit, totalUsed int64, endDate *time.Time) string {
 	download := strconv.FormatInt(totalUsed, 10)
 	total := strconv.FormatInt(totalLimit, 10)
-	return "upload=0; download=" + download + "; total=" + total
+	return appendExpire("upload=0; download="+download+"; total="+total, endDate)
 }
 
 // 将映射的键作为切片返回

@@ -195,7 +195,16 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 
 // chooseClashServerHostV6 返回 IPv6 节点的 clash server host:优先用 v6 专用域名(DomainV6),
 // 否则回落到 IPv6 字面地址(IPAddressV6)。两者都空 → 返回空(该 server 无 v6,跳过建 v6 节点)。
+//
+// 锁定入口 IP 时:忽略域名/DDNS/v6,v6 节点同样只用手填的「服务器地址」(PullAddress→IPAddress),
+// 与 handler 层 chooseClashServerHost 的锁定分支保持一致 —— NAT 机的动态出口 IPv6 连不上。
 func chooseClashServerHostV6(server *storage.RemoteServer) string {
+	if server.LockEntryIP {
+		if p := strings.TrimSpace(server.PullAddress); p != "" {
+			return p
+		}
+		return strings.TrimSpace(server.IPAddress)
+	}
 	if d := strings.TrimSpace(server.DomainV6); d != "" {
 		return d
 	}

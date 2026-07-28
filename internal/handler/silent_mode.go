@@ -59,11 +59,26 @@ func (m *SilentModeManager) refreshShortLinkSet() {
 	if err != nil {
 		return
 	}
+	// package 短码查失败不致命(多数部署没套餐),忽略错误按空处理。
+	packageCodes, _ := m.repo.GetAllPackageShortCodes(ctx)
 
-	set := make(map[string]struct{}, len(fileCodes)*len(userCodes))
+	set := make(map[string]struct{})
+	// 新版单码 /x/{code}:file_short_code / custom_short_code / package.short_code 各自单独
+	// 命中一条订阅(与 short_link.go TryServe 的 GetSubscribeFileByShortCode 对齐)。
+	// 之前只塞下面的复合码,新版单码永远进不了 set,是 /x/ 被静默模式误杀的原因之一。
 	for fc := range fileCodes {
-		for uc := range userCodes {
+		set[fc] = struct{}{}
+	}
+	for pc := range packageCodes {
+		set[pc] = struct{}{}
+	}
+	// 旧版复合码 /x/{fileCode|packageCode}{userCode}(TryServe 的 fallback 拆分匹配)。
+	for uc := range userCodes {
+		for fc := range fileCodes {
 			set[fc+uc] = struct{}{}
+		}
+		for pc := range packageCodes {
+			set[pc+uc] = struct{}{}
 		}
 	}
 
@@ -172,8 +187,13 @@ func (m *SilentModeManager) isAllowedPath(path string) bool {
 	}
 
 	trimmedPath := strings.Trim(path, "/")
-	if m.isKnownShortLink(trimmedPath) {
-		return true
+	// /x/{code} 短链接:必须先剥掉 "x/" 前缀再判断。原来直接把 "x/{code}" 交给
+	// isKnownShortLink,其中的 '/' 会让 isAlphanumericPath 立刻返回 false,导致所有 /x/
+	// 短链接被静默模式误杀 —— 下不了订阅,也就无从触发 RecordSubscriptionAccessWithIP 解锁主控。
+	if code, ok := strings.CutPrefix(trimmedPath, "x/"); ok {
+		if m.isKnownShortLink(code) {
+			return true
+		}
 	}
 
 	return false

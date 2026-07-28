@@ -20,7 +20,7 @@ func registerTemplateRuleTools(s *server.MCPServer, b *bridge) {
 
 	s.AddTool(readTool("template_v3_preview", "用 inline content + 一批 proxies 预览渲染后的订阅 YAML。常用于改模板前预览效果。",
 		mcpgo.WithString("template_content", mcpgo.Required(), mcpgo.Description("V3 模板内容(YAML 字符串)")),
-		mcpgo.WithArray("proxies", mcpgo.Required(), mcpgo.Description("代理节点数组(Clash 节点对象)")),
+		mcpgo.WithArray("proxies", mcpgo.Required(), mcpgo.Description("代理节点数组(Clash 节点对象)"), mcpgo.Items(map[string]any{"type": "object"})),
 	),
 		func(ctx context.Context, req mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
 			return b.send(ctx, http.MethodPost, "/api/admin/template-v3/preview-with-tags", argsBody(req))

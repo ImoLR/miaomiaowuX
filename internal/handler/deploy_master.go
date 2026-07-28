@@ -41,18 +41,18 @@ func getDomainFromMasterURL(repo *storage.TrafficRepository, ctx context.Context
 }
 
 func (h *CertificateHandler) findCertForDomain(ctx context.Context, domain string, serverID int64) (*storage.Certificate, error) {
-	cert, err := h.repo.GetCertificateByDomain(ctx, domain, serverID)
+	cert, err := h.repo.FindDeployableCertByDomain(ctx, domain, serverID)
 	if err == nil && cert != nil && cert.CertPEM != "" && cert.KeyPEM != "" {
 		return cert, nil
 	}
 	rootDomain := extractRootDomain(domain)
 	wildcardDomain := "*." + rootDomain
-	cert, err = h.repo.GetCertificateByDomain(ctx, wildcardDomain, serverID)
+	cert, err = h.repo.FindDeployableCertByDomain(ctx, wildcardDomain, serverID)
 	if err == nil && cert != nil && cert.CertPEM != "" && cert.KeyPEM != "" {
 		return cert, nil
 	}
 	if rootDomain != domain {
-		cert, err = h.repo.GetCertificateByDomain(ctx, rootDomain, serverID)
+		cert, err = h.repo.FindDeployableCertByDomain(ctx, rootDomain, serverID)
 		if err == nil && cert != nil && cert.CertPEM != "" && cert.KeyPEM != "" {
 			return cert, nil
 		}

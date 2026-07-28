@@ -398,16 +398,20 @@ func (r *TrafficRepository) AssignOwnershipForMmwImported(ctx context.Context, a
 	if strings.TrimSpace(adminUsername) == "" {
 		return errors.New("admin username 必填")
 	}
-	// 只更新 created_by 为空的行,不覆盖已有归属
+	// subscribe_files / templates 在妙妙屋里是**管理员配置**(非按用户归属),迁移后本应归本地 admin。
+	// 妙妙屋备份带入的行 created_by = 它自己的用户名(非空),且那个 mmw admin 随后被 DemoteExtraAdmins
+	// 降级为普通用户 —— 若只补空值,这些订阅就永远挂在一个被降级的陌生用户名下,归属混乱、owner 作用域
+	// 视图看不到、普通用户视角删不掉(虽 admin 有绕过仍可删)。这里把所有**非本地 admin 归属**的行
+	// (空值 + 归属旧 mmw 用户的)统一认领给本地 admin;已经是 admin 的不动。
 	if _, err := r.db.ExecContext(ctx,
-		`UPDATE subscribe_files SET created_by = ? WHERE created_by IS NULL OR created_by = ''`,
-		adminUsername,
+		`UPDATE subscribe_files SET created_by = ? WHERE created_by IS NULL OR created_by <> ?`,
+		adminUsername, adminUsername,
 	); err != nil {
 		return fmt.Errorf("update subscribe_files.created_by: %w", err)
 	}
 	if _, err := r.db.ExecContext(ctx,
-		`UPDATE templates SET created_by = ? WHERE created_by IS NULL OR created_by = ''`,
-		adminUsername,
+		`UPDATE templates SET created_by = ? WHERE created_by IS NULL OR created_by <> ?`,
+		adminUsername, adminUsername,
 	); err != nil {
 		return fmt.Errorf("update templates.created_by: %w", err)
 	}

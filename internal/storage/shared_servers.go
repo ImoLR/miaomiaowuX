@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -11,36 +12,69 @@ import (
 // 分享令牌明文只在创建时返回一次,库里只存 sha256 哈希。
 
 type SharedServer struct {
-	ID        int64      `json:"id"`
-	ServerID  int64      `json:"server_id"`
-	Label     string     `json:"label"`
-	CreatedAt time.Time  `json:"created_at"`
-	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+	ID       int64  `json:"id"`
+	ServerID int64  `json:"server_id"`
+	Label    string `json:"label"`
+	// AllowManageXray 是否允许接收方查看/修改完整 Xray 配置(全权)。默认 false = 只能看/改自己经本分享
+	// 建的入站(拥有方在 federation 边界作用域过滤),防止反推其他用户的连接链接。
+	AllowManageXray bool       `json:"allow_manage_xray"`
+	CreatedAt       time.Time  `json:"created_at"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
 }
 
 func (r *TrafficRepository) ensureSharedServersTable(ctx context.Context) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
-	_, err := r.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS shared_servers (
+	if _, err := r.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS shared_servers (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		server_id INTEGER NOT NULL,
 		token_hash TEXT NOT NULL UNIQUE,
 		label TEXT NOT NULL DEFAULT '',
+		allow_manage_xray INTEGER NOT NULL DEFAULT 0,
 		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		revoked_at TIMESTAMP
-	)`)
+	)`); err != nil {
+		return err
+	}
+	// 老库补列(幂等):历史 shared_servers 无 allow_manage_xray。
+	return r.ensureSharedServersColumn(ctx, "allow_manage_xray", "INTEGER NOT NULL DEFAULT 0")
+}
+
+// ensureSharedServersColumn 幂等给 shared_servers 加列(照 ensureRemoteServerColumn 范式)。
+func (r *TrafficRepository) ensureSharedServersColumn(ctx context.Context, name, definition string) error {
+	rows, err := r.db.QueryContext(ctx, `PRAGMA table_info(shared_servers)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid                int
+			colName, colType   string
+			notNull, pk        int
+			defaultVal         sql.NullString
+		)
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &defaultVal, &pk); err != nil {
+			return err
+		}
+		if strings.EqualFold(colName, name) {
+			return nil
+		}
+	}
+	_, err = r.db.ExecContext(ctx, "ALTER TABLE shared_servers ADD COLUMN "+name+" "+definition)
 	return err
 }
 
 // CreateSharedServer 记录一条分享(token 哈希由调用方算好传入)。
-func (r *TrafficRepository) CreateSharedServer(ctx context.Context, serverID int64, tokenHash, label string) (int64, error) {
+// allowManageXray=true 时接收方可查看/修改完整 Xray 配置;false(默认)则只能管自己经本分享建的入站。
+func (r *TrafficRepository) CreateSharedServer(ctx context.Context, serverID int64, tokenHash, label string, allowManageXray bool) (int64, error) {
 	if err := r.ensureSharedServersTable(ctx); err != nil {
 		return 0, err
 	}
 	res, err := r.db.ExecContext(ctx,
-		`INSERT INTO shared_servers (server_id, token_hash, label, created_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
-		serverID, tokenHash, label)
+		`INSERT INTO shared_servers (server_id, token_hash, label, allow_manage_xray, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		serverID, tokenHash, label, boolToInt(allowManageXray))
 	if err != nil {
 		return 0, err
 	}
@@ -54,15 +88,17 @@ func (r *TrafficRepository) GetSharedServerByTokenHash(ctx context.Context, toke
 		return s, err
 	}
 	var revoked sql.NullTime
+	var allowXray int
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, server_id, label, created_at, revoked_at FROM shared_servers WHERE token_hash = ? AND revoked_at IS NULL LIMIT 1`,
-		tokenHash).Scan(&s.ID, &s.ServerID, &s.Label, &s.CreatedAt, &revoked)
+		`SELECT id, server_id, label, COALESCE(allow_manage_xray, 0), created_at, revoked_at FROM shared_servers WHERE token_hash = ? AND revoked_at IS NULL LIMIT 1`,
+		tokenHash).Scan(&s.ID, &s.ServerID, &s.Label, &allowXray, &s.CreatedAt, &revoked)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return s, ErrSharedServerNotFound
 		}
 		return s, err
 	}
+	s.AllowManageXray = allowXray != 0
 	if revoked.Valid {
 		s.RevokedAt = &revoked.Time
 	}
@@ -75,7 +111,7 @@ func (r *TrafficRepository) ListSharedServers(ctx context.Context, serverID int6
 		return nil, err
 	}
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, server_id, label, created_at, revoked_at FROM shared_servers WHERE server_id = ? AND revoked_at IS NULL ORDER BY created_at DESC`,
+		`SELECT id, server_id, label, COALESCE(allow_manage_xray, 0), created_at, revoked_at FROM shared_servers WHERE server_id = ? AND revoked_at IS NULL ORDER BY created_at DESC`,
 		serverID)
 	if err != nil {
 		return nil, err
@@ -85,9 +121,11 @@ func (r *TrafficRepository) ListSharedServers(ctx context.Context, serverID int6
 	for rows.Next() {
 		var s SharedServer
 		var revoked sql.NullTime
-		if err := rows.Scan(&s.ID, &s.ServerID, &s.Label, &s.CreatedAt, &revoked); err != nil {
+		var allowXray int
+		if err := rows.Scan(&s.ID, &s.ServerID, &s.Label, &allowXray, &s.CreatedAt, &revoked); err != nil {
 			return nil, err
 		}
+		s.AllowManageXray = allowXray != 0
 		if revoked.Valid {
 			s.RevokedAt = &revoked.Time
 		}

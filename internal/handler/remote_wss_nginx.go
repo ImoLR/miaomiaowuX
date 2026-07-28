@@ -167,13 +167,13 @@ func (h *RemoteManageHandler) SyncWSSNginx(ctx context.Context, serverID int64) 
 	rootDomain := extractRootDomain(domain)
 
 	// 证书查找优先级 (跟 reality 流程一致,见 remote_reality_domains.go HandleSetupSSL):
-	//   1. per-server 精确匹配 (server_id=X, domain=rootDomain)
-	//   2. 回退到全局通配证书 (server_id=0, domain="*."+rootDomain) — auto_deploy 会被推到 agent
+	//   1. 共享池按 rootDomain 找 (优先本机自己申请的,再回退到其他机器/主控申请的)
+	//   2. 回退到通配证书 "*."+rootDomain (同样共享,优先本机)
 	//   3. 都找不到 → 跳过
 	var certDomain string
-	if c, err := h.repo.GetCertificateByDomain(ctx, rootDomain, serverID); err == nil && c != nil {
+	if c, err := h.repo.FindDeployableCertByDomain(ctx, rootDomain, serverID); err == nil && c != nil {
 		certDomain = c.Domain
-	} else if c2, err2 := h.repo.GetCertificateByDomain(ctx, "*."+rootDomain, 0); err2 == nil && c2 != nil {
+	} else if c2, err2 := h.repo.FindDeployableCertByDomain(ctx, "*."+rootDomain, serverID); err2 == nil && c2 != nil {
 		certDomain = c2.Domain
 	}
 	if certDomain == "" {

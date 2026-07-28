@@ -1255,6 +1255,11 @@ func cloneClashWithCredential(parentClash, protocol string, newCred map[string]i
 		if psk, ok := newCred["psk"].(string); ok && psk != "" {
 			pc["psk"] = psk
 		}
+	case "anytls":
+		// anytls 每用户独立 password;换成本 client 的 password,否则订阅里是父节点(admin)的 password → 连不上
+		if pw, ok := newCred["password"].(string); ok && pw != "" {
+			pc["password"] = pw
+		}
 	}
 	b, err := json.Marshal(pc)
 	if err != nil {

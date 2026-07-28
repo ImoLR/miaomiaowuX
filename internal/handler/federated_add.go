@@ -62,6 +62,11 @@ func (h *AddSharedServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	ip, _ := info["ip_address"].(string)
+	// v6 网络信息透传:分享服务器也能建 IPv6 节点(联邦轮询里也会持续同步)。
+	ipv6, _ := info["ip_address_v6"].(string)
+	domain, _ := info["domain"].(string)
+	domainV6, _ := info["domain_v6"].(string)
+	ipv6Enabled, _ := info["ipv6_enabled"].(bool)
 	// 拥有方 xray 模式透传,避免消费方按默认 'external' 显示与拥有方不一致(联邦轮询里也会持续同步)
 	xrayMode, _ := info["xray_mode"].(string)
 	if xrayMode != "embedded" && xrayMode != "external" {
@@ -74,11 +79,15 @@ func (h *AddSharedServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	server := &storage.RemoteServer{
-		Name:      name,
-		Token:     token, // 占位:联邦服务器不直连 agent,不使用此 token
-		Status:    "connected",
-		IPAddress: ip,
-		XrayMode:  xrayMode,
+		Name:        name,
+		Token:       token, // 占位:联邦服务器不直连 agent,不使用此 token
+		Status:      "connected",
+		IPAddress:   ip,
+		IPAddressV6: ipv6,
+		IPv6Enabled: ipv6Enabled,
+		Domain:      domain,
+		DomainV6:    domainV6,
+		XrayMode:    xrayMode,
 	}
 	if err := h.repo.CreateRemoteServer(r.Context(), server); err != nil {
 		writeError(w, http.StatusInternalServerError, err)

@@ -16,6 +16,7 @@ import (
 
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/license"
+	"miaomiaowux/internal/logger"
 	"miaomiaowux/internal/storage"
 
 	"golang.org/x/crypto/bcrypt"
@@ -132,6 +133,7 @@ func (h *TGBotAPIHandler) announcementsPending(w http.ResponseWriter, r *http.Re
 	ctx := r.Context()
 	items, err := h.repo.ListPendingBotAnnouncements(ctx)
 	if err != nil {
+		logger.Error("[公告广播] 查询待推送 bot 公告失败", "error", err.Error())
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -144,6 +146,9 @@ func (h *TGBotAPIHandler) announcementsPending(w http.ResponseWriter, r *http.Re
 	out := make([]pendingAnn, 0, len(items))
 	if len(items) > 0 {
 		users, _ := h.repo.ListActivePackageTGUsers(ctx)
+		// 关键诊断:待推送公告数 + 合格收件人(绑定 TG 且有生效套餐)总数。
+		// 若 eligible_tg_users=0 → 没有任何用户满足「绑 TG + 有生效套餐」,公告发不出去(收不到的常见真因)。
+		logger.Info("[公告广播] bot 轮询到待推送公告", "pending_count", len(items), "eligible_tg_users", len(users))
 		// 套餐是否含某节点的缓存(同一批用户很多共用套餐,避免重复查库)
 		pkgHasNode := map[string]bool{} // key = "packageID:nodeID"
 		hasNode := func(pkgID, nodeID int64) bool {
@@ -171,6 +176,13 @@ func (h *TGBotAPIHandler) announcementsPending(w http.ResponseWriter, r *http.Re
 				}
 				recips = append(recips, u.TelegramID)
 			}
+			if len(recips) == 0 {
+				logger.Warn("[公告广播] 公告无收件人 → 无人收到",
+					"announcement_id", it.ID, "title", it.Title, "node_id", it.NodeID,
+					"reason", "无「绑定TG且有生效套餐」的用户;若为节点相关公告,可能套餐都不含该节点")
+			} else {
+				logger.Info("[公告广播] 公告收件人已解析", "announcement_id", it.ID, "title", it.Title, "recipients", len(recips))
+			}
 			out = append(out, pendingAnn{ID: it.ID, Title: it.Title, Body: it.Body, Recipients: recips})
 		}
 	}
@@ -187,9 +199,11 @@ func (h *TGBotAPIHandler) announcementDelivered(w http.ResponseWriter, r *http.R
 		return
 	}
 	if err := h.repo.MarkAnnouncementBotDelivered(r.Context(), req.ID); err != nil {
+		logger.Error("[公告广播] 标记 bot 已推送失败", "announcement_id", req.ID, "error", err.Error())
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	logger.Info("[公告广播] bot 回报公告已推送完成", "announcement_id", req.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -748,18 +762,23 @@ func (h *TGBotAPIHandler) userSummary(w http.ResponseWriter, r *http.Request) {
 	if user.PackageEndDate != nil {
 		out["package_end_date"] = user.PackageEndDate.Format(time.RFC3339)
 	}
-	// 流量
+	// 流量:本周期已用走**计费口径**(倍率已折算进 weighted_*),与 Web 流量页面同源
+	// (GetUserBillableTraffic)。这里用分方向版,因为 bot 卡片要显示"本周期 ↑ ↓";
+	// cycle_uplink+cycle_downlink 恰好等于面板 billable。累计 total_* 仍为裸实际传输量,
+	// 语义是"历史真实流量",不参与限额,故不折算倍率。
 	rows, _ := h.repo.GetUserTrafficByUsername(r.Context(), username)
-	var sumUp, sumDown, totalUp, totalDown int64
+	var totalUp, totalDown int64
 	for _, t := range rows {
-		sumUp += t.Uplink
-		sumDown += t.Downlink
 		totalUp += t.TotalUplink
 		totalDown += t.TotalDownlink
 	}
+	cycleUp, cycleDown, berr := h.repo.GetUserBillableTrafficByDirection(r.Context(), username)
+	if berr != nil {
+		cycleUp, cycleDown = 0, 0
+	}
 	out["traffic"] = map[string]any{
-		"cycle_uplink":   sumUp,
-		"cycle_downlink": sumDown,
+		"cycle_uplink":   cycleUp,
+		"cycle_downlink": cycleDown,
 		"total_uplink":   totalUp,
 		"total_downlink": totalDown,
 	}

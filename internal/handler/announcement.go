@@ -240,7 +240,15 @@ func (h *AnnouncementHandler) deleteInstance(w http.ResponseWriter, r *http.Requ
 
 // PublishAnnouncement 插入一条公告实例(手动 / 自动触发 / tgbot 命令共用)。
 func (h *AnnouncementHandler) PublishAnnouncement(ctx context.Context, a storage.Announcement) (int64, error) {
-	return h.repo.CreateAnnouncement(ctx, a)
+	id, err := h.repo.CreateAnnouncement(ctx, a)
+	if err != nil {
+		log.Printf("[公告广播] 创建公告失败: type=%s via_bot=%v via_miniapp=%v err=%v", a.Type, a.ViaBot, a.ViaMiniapp, err)
+		return id, err
+	}
+	// 关键诊断:via_bot=false 的公告 bot 永远不会推送(收不到 TG 的一大真因)。
+	// 排查「收不到 TG」时,先看这条日志确认 via_bot 是否为 true;再看 tgbot_admin 的「bot 轮询到待推送公告」日志确认收件人数。
+	log.Printf("[公告广播] 已创建公告 id=%d type=%s via_bot=%v via_miniapp=%v", id, a.Type, a.ViaBot, a.ViaMiniapp)
+	return id, nil
 }
 
 // ===== 生效公告(authenticated) GET /api/announcements/active =====
