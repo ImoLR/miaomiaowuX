@@ -60,8 +60,10 @@ type ProbeSysSnapshot struct {
 	DiskUsed  int64   `json:"disk_used"`
 	DiskTotal int64   `json:"disk_total"`
 	// 掩码:agent 只上报开启项,这里记录哪些字段有效(避免 0 值被当成真实数据)。
-	HasCPU, HasMem, HasDisk bool
-	At                      int64 // unix 秒
+	HasCPU  bool  `json:"has_cpu"`
+	HasMem  bool  `json:"has_mem"`
+	HasDisk bool  `json:"has_disk"`
+	At      int64 `json:"at"` // unix 秒
 }
 
 // ProbeLatencySample 是一次 ping 的结果(agent 上报)。

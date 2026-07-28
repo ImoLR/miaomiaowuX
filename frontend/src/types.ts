@@ -41,6 +41,22 @@ export type RemoteServer = {
   domain?: string;
   traffic_source?: string;
   ws_connected?: boolean;
+  sysmetrics?: SystemMetrics | null;
+};
+
+export type SystemMetrics = {
+  cpu_pct?: number;
+  loadavg?: string;
+  mem_used?: number;
+  mem_total?: number;
+  disk_used?: number;
+  disk_total?: number;
+  has_cpu?: boolean;
+  has_mem?: boolean;
+  has_disk?: boolean;
+  HasCPU?: boolean;
+  HasMem?: boolean;
+  HasDisk?: boolean;
 };
 
 export type RemoteServersResponse = {

@@ -8,10 +8,13 @@ import {
   LogOut,
   Menu,
   Moon,
+  Power,
   RefreshCw,
+  RotateCw,
   Server,
   Settings,
   Sun,
+  Wrench,
   UserRound,
   Users,
 } from "lucide-react";
@@ -26,6 +29,7 @@ import {
 } from "recharts";
 import {
   clearSession,
+  controlRemoteService,
   fetchAdminTraffic,
   fetchNodeTotals,
   fetchRemoteServers,
@@ -186,6 +190,8 @@ function Dashboard({
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState("overview");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [selectedServerId, setSelectedServerId] = useState<number | null>(null);
+  const [xrayActionBusy, setXrayActionBusy] = useState(false);
 
   const refreshUserSpeeds = useCallback(
     async (servers: RemoteServer[]) => {
@@ -323,7 +329,39 @@ function Dashboard({
   const totals = useMemo(() => calculateTotals(state.servers), [state.servers]);
   const topNodes = useMemo(() => [...state.nodes].sort(byTraffic).slice(0, 5), [state.nodes]);
   const topUsers = useMemo(() => [...state.users].sort(byUserTraffic).slice(0, 5), [state.users]);
-  const primaryServer = state.servers[0];
+  const selectedServer = useMemo(() => {
+    if (state.servers.length === 0) return undefined;
+    return state.servers.find((server) => server.id === selectedServerId) ?? state.servers[0];
+  }, [selectedServerId, state.servers]);
+
+  useEffect(() => {
+    if (state.servers.length === 0) {
+      setSelectedServerId(null);
+      return;
+    }
+    if (selectedServerId == null || !state.servers.some((server) => server.id === selectedServerId)) {
+      setSelectedServerId(state.servers[0].id);
+    }
+  }, [selectedServerId, state.servers]);
+
+  const runXrayAction = useCallback(
+    async (action: "start" | "stop" | "restart") => {
+      if (!selectedServer || xrayActionBusy) return;
+      const label = action === "restart" ? "重启" : action === "stop" ? "停止" : "启动";
+      if (!window.confirm(`确认${label} ${selectedServer.name} 的 Xray？`)) return;
+      setXrayActionBusy(true);
+      setError("");
+      try {
+        await controlRemoteService(session.token, selectedServer.id, "xray", action);
+        await loadDashboard();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : `${label} Xray 失败`);
+      } finally {
+        setXrayActionBusy(false);
+      }
+    },
+    [loadDashboard, selectedServer, session.token, xrayActionBusy],
+  );
 
   return (
     <main className="app-shell">
@@ -358,16 +396,14 @@ function Dashboard({
       ) : (
         <div className="dashboard-content" aria-busy={loading}>
           <section className="metric-grid">
-            <MetricCard variant="purple" title="总流量配额" value={formatGB(state.summary?.metrics.total_limit_gb)} detail={`剩余 ${formatGB(state.summary?.metrics.total_remaining_gb)}`} />
-            <MetricCard variant="blue" title="已用流量" value={formatGB(state.summary?.metrics.total_used_gb)} detail={`占比 ${formatPercent(state.summary?.metrics.usage_percentage)}`} />
-            <MetricCard variant="orange" title="实时网速" value={`↑ ${formatSpeed(totals.upload)}`} detail={`↓ ${formatSpeed(totals.download)}`} />
-            <MetricCard variant="green" title="运行时间" value={formatDurationSince(primaryServer?.xray_boot_time)} detail={primaryServer?.xray_running ? "Xray 运行中" : "等待数据"} />
+            <SystemStatusCard server={selectedServer} servers={state.servers} selectedServerId={selectedServerId} onSelectServer={setSelectedServerId} />
+            <XrayStatusCard server={selectedServer} busy={xrayActionBusy} onAction={runXrayAction} />
           </section>
 
           <TrafficChart summary={state.summary} />
           <NodeView nodes={topNodes} />
           <UserView users={topUsers} connections={state.userConnections} speeds={state.userSpeeds} />
-          <ServerOverview server={primaryServer} upload={totals.upload} download={totals.download} />
+          <ServerOverview server={selectedServer} upload={totals.upload} download={totals.download} />
         </div>
       )}
 
@@ -389,13 +425,127 @@ function Dashboard({
   );
 }
 
-function MetricCard({ title, value, detail, variant }: { title: string; value: string; detail: string; variant: string }) {
+function SystemStatusCard({
+  server,
+  servers,
+  selectedServerId,
+  onSelectServer,
+}: {
+  server?: RemoteServer;
+  servers: RemoteServer[];
+  selectedServerId: number | null;
+  onSelectServer: (serverId: number) => void;
+}) {
+  const sys = server?.sysmetrics;
+  const hasCPU = sys?.has_cpu ?? sys?.HasCPU ?? false;
+  const hasMem = sys?.has_mem ?? sys?.HasMem ?? false;
+  const hasDisk = sys?.has_disk ?? sys?.HasDisk ?? false;
+  const cpu = metricFromPercent(hasCPU ? sys?.cpu_pct : undefined, "CPU", "-- Core");
+  const memory = metricFromUsage(hasMem ? sys?.mem_used : undefined, hasMem ? sys?.mem_total : undefined, "内存");
+  const swap = metricFromUsage(0, 0, "交换空间");
+  const disk = metricFromUsage(hasDisk ? sys?.disk_used : undefined, hasDisk ? sys?.disk_total : undefined, "存储");
+
   return (
-    <article className={`metric-card ${variant}`}>
-      <span>{title}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
-    </article>
+    <section className="panel-card system-status-card" aria-label="系统状态">
+      <div className="status-card-source">
+        <span>系统状态</span>
+        {servers.length > 1 ? (
+          <select value={selectedServerId ?? ""} onChange={(event) => onSelectServer(Number(event.target.value))} aria-label="选择系统状态服务器">
+            {servers.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <strong>{server?.name ?? "暂无服务器"}</strong>
+        )}
+      </div>
+      <div className="system-metric-grid">
+        <SystemGauge metric={cpu} tone="blue" />
+        <SystemGauge metric={memory} tone={memory.percent >= 80 ? "orange" : "blue"} />
+        <SystemGauge metric={swap} tone="neutral" />
+        <SystemGauge metric={disk} tone={disk.percent >= 80 ? "orange" : "blue"} />
+      </div>
+    </section>
+  );
+}
+
+function XrayStatusCard({
+  server,
+  busy,
+  onAction,
+}: {
+  server?: RemoteServer;
+  busy: boolean;
+  onAction: (action: "start" | "stop" | "restart") => void;
+}) {
+  const state = xrayState(server);
+  const version = server?.xray_version ? `v${stripVersionPrefix(server.xray_version)}` : "版本未知";
+  const serviceAction = server?.xray_running ? "stop" : "start";
+  const controlDisabled = !server || busy;
+  const settingsTitle = "当前新版前端还没有已迁移的 Xray 设置入口";
+
+  return (
+    <section className="panel-card xray-card" aria-label="Xray 状态">
+      <div className="xray-card-main">
+        <div className="xray-title-group">
+          <h2>Xray</h2>
+          <span className="xray-version">{version}</span>
+        </div>
+        <div className="xray-state">
+          <span className={`xray-state-dot ${state.kind}`} />
+          <span>{state.label}</span>
+        </div>
+      </div>
+      <div className="xray-actions" aria-label="Xray 操作">
+        <button type="button" disabled={controlDisabled} onClick={() => onAction(serviceAction)} aria-label={server?.xray_running ? "停止 Xray" : "启动 Xray"}>
+          <Power />
+        </button>
+        <button type="button" disabled={controlDisabled} onClick={() => onAction("restart")} aria-label="重启 Xray">
+          <RotateCw />
+        </button>
+        <button type="button" disabled title={settingsTitle} aria-label={settingsTitle}>
+          <Wrench />
+        </button>
+      </div>
+    </section>
+  );
+}
+
+type SystemMetric = {
+  label: string;
+  percent: number;
+  percentText: string;
+  detail: string;
+};
+
+function SystemGauge({ metric, tone }: { metric: SystemMetric; tone: "blue" | "orange" | "neutral" }) {
+  const radius = 42;
+  const circumference = 2 * Math.PI * radius;
+  const arc = circumference * 0.72;
+  const progress = arc * clampPercent(metric.percent) / 100;
+
+  return (
+    <div className="system-metric">
+      <svg className={`gauge-ring ${tone}`} viewBox="0 0 110 86" role="img" aria-label={`${metric.label} ${metric.percentText}`}>
+        <circle className="gauge-rail" cx="55" cy="55" r={radius} pathLength={circumference} />
+        <circle
+          className="gauge-value"
+          cx="55"
+          cy="55"
+          r={radius}
+          pathLength={circumference}
+          strokeDasharray={`${progress} ${circumference - progress}`}
+        />
+        <text x="55" y="58" textAnchor="middle">
+          {metric.percentText}
+        </text>
+      </svg>
+      <div className="system-metric-label">
+        <strong>{metric.label}:</strong> <span>{metric.detail}</span>
+      </div>
+    </div>
   );
 }
 
@@ -642,6 +792,45 @@ function formatUserRealtime(connections?: number, speed?: number) {
 function formatPercent(value?: number | null) {
   if (value == null || Number.isNaN(value)) return "--";
   return `${value.toFixed(value >= 10 ? 1 : 2)}%`;
+}
+
+function metricFromPercent(value: number | undefined, label: string, detail: string): SystemMetric {
+  const hasData = typeof value === "number" && Number.isFinite(value);
+  const percent = hasData ? clampPercent(value) : 0;
+  return {
+    label,
+    percent,
+    percentText: hasData ? `${trimPercent(percent)}%` : "--",
+    detail,
+  };
+}
+
+function metricFromUsage(used: number | undefined, total: number | undefined, label: string): SystemMetric {
+  const hasData = typeof used === "number" && typeof total === "number" && Number.isFinite(used) && Number.isFinite(total);
+  const percent = hasData && total > 0 ? clampPercent((used / total) * 100) : 0;
+  return {
+    label,
+    percent,
+    percentText: hasData ? `${trimPercent(percent)}%` : "--",
+    detail: hasData ? `${formatBytes(used)} / ${formatBytes(total)}` : "-- / --",
+  };
+}
+
+function xrayState(server?: RemoteServer) {
+  if (!server) return { kind: "unknown", label: "等待数据" };
+  return server.xray_running ? { kind: "running", label: "运行中" } : { kind: "stopped", label: "已停止" };
+}
+
+function stripVersionPrefix(version: string) {
+  return version.trim().replace(/^v/i, "");
+}
+
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, value));
+}
+
+function trimPercent(value: number) {
+  return value.toFixed(2).replace(/\.?0+$/, "");
 }
 
 function tabTitle(tab: string) {

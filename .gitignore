@@ -38,6 +38,7 @@ miaomiaowu.db
 # 历史上已 commit 的文件需要 `git rm -r miaomiaowux-frontend/` 显式从 index 移除一次。
 miaomiaowux-frontend/
 frontend/node_modules/
+frontend/.vite/
 frontend/*.tsbuildinfo
 frontend/vite.config.d.ts
 frontend/vite.config.js

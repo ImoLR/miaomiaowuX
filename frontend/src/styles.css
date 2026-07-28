@@ -263,8 +263,8 @@ button {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
 }
 
 .metric-card {
@@ -317,6 +317,224 @@ button {
 
 .metric-card.green {
   border-color: var(--line);
+}
+
+.system-status-card {
+  padding: 28px 18px 24px;
+}
+
+.status-card-source {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -4px 0 20px;
+  color: var(--text);
+  font-size: 17px;
+}
+
+.status-card-source > span {
+  font-weight: 500;
+}
+
+.status-card-source strong,
+.status-card-source select {
+  min-width: 0;
+  max-width: 62%;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.status-card-source select {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  padding: 0 30px 0 10px;
+  outline: none;
+}
+
+.system-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 26px 10px;
+}
+
+.system-metric {
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  text-align: center;
+}
+
+.gauge-ring {
+  width: 118px;
+  height: 92px;
+  overflow: visible;
+}
+
+.gauge-ring circle {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 8;
+  transform: rotate(140deg);
+  transform-origin: 55px 55px;
+}
+
+.gauge-ring .gauge-rail {
+  stroke: rgba(0, 0, 0, 0.08);
+  stroke-dasharray: 190 264;
+}
+
+.gauge-ring .gauge-value {
+  stroke: var(--primary);
+}
+
+.gauge-ring.orange .gauge-value {
+  stroke: #faad14;
+}
+
+.gauge-ring.neutral .gauge-value {
+  stroke: rgba(0, 0, 0, 0.16);
+}
+
+.gauge-ring text {
+  fill: var(--text);
+  font-size: 20px;
+  font-weight: 500;
+  dominant-baseline: middle;
+  font-variant-numeric: tabular-nums;
+}
+
+.system-metric-label {
+  max-width: 100%;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.system-metric-label strong {
+  font-weight: 700;
+}
+
+.system-metric-label span {
+  font-weight: 400;
+}
+
+.xray-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.xray-card-main {
+  min-height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 22px 28px;
+}
+
+.xray-title-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.xray-title-group h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.xray-version {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  max-width: 132px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: #389e0d;
+  padding: 0 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.xray-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text);
+  font-size: 22px;
+  white-space: nowrap;
+}
+
+.xray-state-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #8c8c8c;
+}
+
+.xray-state-dot.running {
+  background: var(--success);
+}
+
+.xray-state-dot.stopped {
+  background: #faad14;
+}
+
+.xray-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+}
+
+.xray-actions button {
+  min-height: 70px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: rgba(0, 0, 0, 0.45);
+}
+
+.xray-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.xray-actions button:first-child {
+  border-left: 0;
+}
+
+.xray-actions svg {
+  width: 28px;
+  height: 28px;
+  stroke-width: 1.9;
+}
+
+:root[data-theme="dark"] .gauge-ring .gauge-rail {
+  stroke: rgba(255, 255, 255, 0.16);
+}
+
+:root[data-theme="dark"] .gauge-ring.neutral .gauge-value {
+  stroke: rgba(255, 255, 255, 0.2);
+}
+
+:root[data-theme="dark"] .xray-actions button {
+  color: rgba(255, 255, 255, 0.58);
 }
 
 .panel-card,
@@ -679,7 +897,12 @@ button {
 
 @media (min-width: 620px) {
   .metric-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .system-metric-grid {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 18px 8px;
   }
 
   .traffic-row {
@@ -714,7 +937,7 @@ button {
   }
 
   .metric-grid {
-    gap: 8px;
+    gap: 14px;
   }
 
   .metric-card {
@@ -724,6 +947,51 @@ button {
 
   .panel-card {
     padding: 14px;
+  }
+
+  .system-status-card {
+    padding: 26px 12px 24px;
+  }
+
+  .system-metric-grid {
+    gap: 24px 4px;
+  }
+
+  .gauge-ring {
+    width: 104px;
+    height: 84px;
+  }
+
+  .gauge-ring text {
+    font-size: 18px;
+  }
+
+  .system-metric-label {
+    font-size: 17px;
+  }
+
+  .xray-card-main {
+    min-height: 96px;
+    padding: 20px 20px;
+  }
+
+  .xray-title-group h2 {
+    font-size: 26px;
+  }
+
+  .xray-version {
+    max-width: 120px;
+    min-height: 30px;
+    font-size: 16px;
+  }
+
+  .xray-state {
+    gap: 10px;
+    font-size: 20px;
+  }
+
+  .xray-actions button {
+    min-height: 66px;
   }
 
   .panel-header {

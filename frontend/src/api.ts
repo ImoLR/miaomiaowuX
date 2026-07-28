@@ -105,3 +105,10 @@ export function fetchUserSpeeds(token: string, serverId: number) {
 export function fetchAdminTraffic(token: string) {
   return request<AdminTrafficResponse>("/api/admin/traffic/servers", token);
 }
+
+export function controlRemoteService(token: string, serverId: number, service: "xray", action: "start" | "stop" | "restart") {
+  return request<{ success?: boolean; message?: string }>(`/api/admin/remote/services/control?server_id=${encodeURIComponent(String(serverId))}`, token, {
+    method: "POST",
+    body: JSON.stringify({ service, action }),
+  });
+}

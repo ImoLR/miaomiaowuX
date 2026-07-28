@@ -124,6 +124,7 @@ type RemoteServerExtended struct {
 	Inbounds    []RemoteServerInboundInfo `json:"inbounds"`
 	Encrypted   bool                      `json:"encrypted"`
 	WsConnected bool                      `json:"ws_connected"`
+	Sysmetrics  *ProbeSysSnapshot         `json:"sysmetrics,omitempty"`
 }
 
 // RemoteServersListResponse 表示所有远程服务器的响应
@@ -224,6 +225,12 @@ func (h *XrayServerHandler) BuildRemoteServersList(ctx context.Context) RemoteSe
 		} else if h.wsHandler != nil {
 			extended.Encrypted = h.wsHandler.IsConnectionEncrypted(server.Token)
 			extended.WsConnected = h.wsHandler.IsConnected(server.Token)
+			if h.wsHandler.probeStore != nil {
+				if view, ok := h.wsHandler.probeStore.Snapshot(server.ID, 0); ok && view.HasSys {
+					sys := view.Sys
+					extended.Sysmetrics = &sys
+				}
+			}
 		}
 
 		trafficUsed, _ := h.repo.GetServerTrafficUsed(ctx, server.ID)
