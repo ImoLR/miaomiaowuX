@@ -12,6 +12,16 @@ import type {
 } from "./types";
 
 const SESSION_KEY = "mmwx-session";
+const MMWX_API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_MMWX_API_BASE_URL ?? "");
+const MMWXC_API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_MMWXC_API_BASE_URL ?? "https://mmwxc.imgamer.top");
+
+function normalizeBaseUrl(value: string) {
+  return value.trim().replace(/\/+$/, "");
+}
+
+function joinUrl(baseUrl: string, path: string) {
+  return baseUrl ? `${baseUrl}${path}` : path;
+}
 
 export function loadSession(): Session | null {
   const raw = localStorage.getItem(SESSION_KEY);
@@ -67,8 +77,24 @@ async function request<T>(path: string, token?: string, init?: RequestInit): Pro
   return (await response.json()) as T;
 }
 
+async function requestCustomApi<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  const response = await fetch(joinUrl(MMWXC_API_BASE_URL, path), { ...init, headers });
+  if (!response.ok) {
+    let message = `请求失败 (${response.status})`;
+    try {
+      const body = (await response.json()) as { error?: string; message?: string };
+      message = body.error || body.message || message;
+    } catch {
+      // Keep the status-based message.
+    }
+    throw new Error(message);
+  }
+  return (await response.json()) as T;
+}
+
 export async function login(username: string, password: string, rememberMe: boolean) {
-  return request<LoginResponse>("/api/login", undefined, {
+  return request<LoginResponse>(joinUrl(MMWX_API_BASE_URL, "/api/login"), undefined, {
     method: "POST",
     body: JSON.stringify({
       username,
@@ -80,39 +106,39 @@ export async function login(username: string, password: string, rememberMe: bool
 }
 
 export function fetchTrafficSummary(token: string) {
-  return request<TrafficSummary>("/api/traffic/summary", token);
+  return request<TrafficSummary>(joinUrl(MMWX_API_BASE_URL, "/api/traffic/summary"), token);
 }
 
 export function fetchRemoteServers(token: string) {
-  return request<RemoteServersResponse>("/api/admin/remote-servers", token);
+  return request<RemoteServersResponse>(joinUrl(MMWX_API_BASE_URL, "/api/admin/remote-servers"), token);
 }
 
-export function fetchLocalSystemMetrics(token: string, signal?: AbortSignal) {
-  return request<SystemMetrics>("/api/admin/dashboard/system", token, { signal });
+export function fetchLocalSystemMetrics(_token: string, signal?: AbortSignal) {
+  return requestCustomApi<SystemMetrics>("/api/dashboard/system", { signal });
 }
 
 export function fetchNodeTotals(token: string, date: string) {
-  return request<NodeTotalsResponse>(`/api/admin/traffic/node-totals?date=${encodeURIComponent(date)}`, token);
+  return request<NodeTotalsResponse>(joinUrl(MMWX_API_BASE_URL, `/api/admin/traffic/node-totals?date=${encodeURIComponent(date)}`), token);
 }
 
 export function fetchUsers(token: string) {
-  return request<UsersTrafficResponse>("/api/admin/traffic/users", token);
+  return request<UsersTrafficResponse>(joinUrl(MMWX_API_BASE_URL, "/api/admin/traffic/users"), token);
 }
 
 export function fetchUserConnections(token: string) {
-  return request<UserConnectionsResponse>("/api/admin/traffic/user-connections", token);
+  return request<UserConnectionsResponse>(joinUrl(MMWX_API_BASE_URL, "/api/admin/traffic/user-connections"), token);
 }
 
 export function fetchUserSpeeds(token: string, serverId: number) {
-  return request<UserSpeedsResponse>(`/api/admin/remote/user-speeds?server_id=${encodeURIComponent(String(serverId))}`, token);
+  return request<UserSpeedsResponse>(joinUrl(MMWX_API_BASE_URL, `/api/admin/remote/user-speeds?server_id=${encodeURIComponent(String(serverId))}`), token);
 }
 
 export function fetchAdminTraffic(token: string) {
-  return request<AdminTrafficResponse>("/api/admin/traffic/servers", token);
+  return request<AdminTrafficResponse>(joinUrl(MMWX_API_BASE_URL, "/api/admin/traffic/servers"), token);
 }
 
 export function controlRemoteService(token: string, serverId: number, service: "xray", action: "start" | "stop" | "restart") {
-  return request<{ success?: boolean; message?: string }>(`/api/admin/remote/services/control?server_id=${encodeURIComponent(String(serverId))}`, token, {
+  return request<{ success?: boolean; message?: string }>(joinUrl(MMWX_API_BASE_URL, `/api/admin/remote/services/control?server_id=${encodeURIComponent(String(serverId))}`), token, {
     method: "POST",
     body: JSON.stringify({ service, action }),
   });

@@ -427,7 +427,6 @@ func main() {
 	// hub 内按 admin/user 角色区分推送内容。数据源复用 xrayServerHandler.BuildRemoteServersList。
 	dashboardWSHub := handler.NewDashboardWSHub(repo, xrayServerHandler, getAllowedOrigins())
 	mux.Handle("/api/ws/dashboard", auth.RequireToken(tokenStore, userRepo, dashboardWSHub))
-	mux.Handle("/api/admin/dashboard/system", auth.RequireAdmin(tokenStore, userRepo, handler.NewDashboardSystemHandler()))
 
 	// 远程服务器管理端点（仅限管理员）
 	mux.Handle("/api/admin/remote-servers", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.ListRemoteServers)))
