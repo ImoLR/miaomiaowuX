@@ -3,18 +3,24 @@ import { createRoot } from "react-dom/client";
 import {
   BarChart3,
   Boxes,
+  ChevronDown,
   Gauge,
+  Globe2,
   Home,
+  LogIn,
   LogOut,
   Menu,
   Moon,
   Power,
   RefreshCw,
+  Route,
   RotateCw,
   Server,
   Settings,
   Sun,
+  Tags,
   Wrench,
+  X,
   UserRound,
   Users,
 } from "lucide-react";
@@ -433,22 +439,13 @@ function Dashboard({
 
   return (
     <main className="app-shell">
-      <header className="topbar">
+      <header className="topbar compact">
         <button className="round-button" type="button" onClick={() => setMenuOpen(true)} aria-label="打开菜单">
           <Menu />
         </button>
-        <h1>{tabTitle(activeTab)}</h1>
-        <div className="top-actions">
-          <button className="round-button" type="button" onClick={onToggleTheme} aria-label="切换主题">
-            {dark ? <Sun /> : <Moon />}
-          </button>
-          <button className="avatar-button" type="button" onClick={onLogout} aria-label="退出登录">
-            {session.avatarUrl ? <img src={session.avatarUrl} alt="" /> : <span>{session.nickname?.[0] || session.username[0]}</span>}
-          </button>
-        </div>
       </header>
 
-      {menuOpen && <SideMenu session={session} onClose={() => setMenuOpen(false)} onLogout={onLogout} />}
+      {menuOpen && <SideMenu session={session} dark={dark} onToggleTheme={onToggleTheme} onClose={() => setMenuOpen(false)} onLogout={onLogout} />}
 
       {error && (
         <section className="notice-card">
@@ -712,14 +709,47 @@ function ServerOverview({ server, upload, download }: { server?: RemoteServer; u
   );
 }
 
-function SideMenu({ session, onClose, onLogout }: { session: Session; onClose: () => void; onLogout: () => void }) {
+function SideMenu({
+  session,
+  dark,
+  onToggleTheme,
+  onClose,
+  onLogout,
+}: {
+  session: Session;
+  dark: boolean;
+  onToggleTheme: () => void;
+  onClose: () => void;
+  onLogout: () => void;
+}) {
+  const menuItems = [
+    { label: "系统状态", icon: Gauge, active: true },
+    { label: "入站", icon: LogIn },
+    { label: "客户端", icon: Users },
+    { label: "分组", icon: Tags },
+    { label: "节点", icon: Server },
+    { label: "主机", icon: Globe2 },
+    { label: "出站", icon: LogOut },
+    { label: "路由", icon: Route },
+    { label: "面板设置", icon: Settings, expandable: true },
+    { label: "Xray 配置", icon: Wrench, expandable: true },
+  ];
+
   return (
     <div className="menu-layer" role="presentation" onClick={onClose}>
       <aside className="side-menu" role="dialog" aria-label="菜单" onClick={(event) => event.stopPropagation()}>
         <div className="menu-top">
           <h2>妙妙屋 X</h2>
+          <div className="menu-top-actions">
+            <button className="ghost-button" type="button" onClick={onToggleTheme} aria-label="切换主题">
+              {dark ? <Sun /> : <Moon />}
+            </button>
+            <button className="avatar-button compact" type="button" onClick={onLogout} aria-label="退出登录">
+              {session.avatarUrl ? <img src={session.avatarUrl} alt="" /> : <span>{session.nickname?.[0] || session.username[0]}</span>}
+            </button>
+          </div>
           <button className="ghost-button" onClick={onClose} type="button">
-            ×
+            <X />
           </button>
         </div>
         <div className="menu-profile">
@@ -727,10 +757,11 @@ function SideMenu({ session, onClose, onLogout }: { session: Session; onClose: (
           <strong>{session.nickname || session.username}</strong>
           <span>{session.role}</span>
         </div>
-        {["订阅链接", "生成订阅", "节点管理", "服务管理", "用户管理", "套餐管理", "证书管理", "模板管理", "订阅管理", "系统设置"].map((item) => (
-          <button className="menu-item" key={item} type="button">
-            <Gauge />
-            <span>{item}</span>
+        {menuItems.map(({ label, icon: Icon, active, expandable }) => (
+          <button className={`menu-item${active ? " active" : ""}`} key={label} type="button">
+            <Icon />
+            <span>{label}</span>
+            {expandable && <ChevronDown className="menu-item-chevron" />}
           </button>
         ))}
         <button className="menu-item danger" type="button" onClick={onLogout}>
