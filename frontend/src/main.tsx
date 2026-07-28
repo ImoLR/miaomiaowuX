@@ -424,15 +424,15 @@ function TrafficChart({ summary }: { summary: TrafficSummary | null }) {
             <AreaChart data={data} margin={{ left: 0, right: 12, top: 18, bottom: 4 }}>
               <defs>
                 <linearGradient id="trafficGradient" x1="0" x2="0" y1="0" y2="1">
-                  <stop offset="5%" stopColor="#6c63ff" stopOpacity={0.32} />
-                  <stop offset="95%" stopColor="#6c63ff" stopOpacity={0.03} />
+                  <stop offset="5%" stopColor="#0958d9" stopOpacity={0.26} />
+                  <stop offset="95%" stopColor="#0958d9" stopOpacity={0.03} />
                 </linearGradient>
               </defs>
               <CartesianGrid stroke="#eef0f6" vertical={false} />
               <XAxis dataKey="date" tick={{ fontSize: 15, fill: "#8a8f9d" }} tickLine={false} axisLine={false} />
               <YAxis tick={{ fontSize: 15, fill: "#8a8f9d" }} tickLine={false} axisLine={false} width={42} />
               <Tooltip formatter={(value) => [`${value} GB`, "流量"]} />
-              <Area type="monotone" dataKey="used" stroke="#6c63ff" strokeWidth={3} fill="url(#trafficGradient)" connectNulls={false} />
+              <Area type="monotone" dataKey="used" stroke="#0958d9" strokeWidth={2.5} fill="url(#trafficGradient)" connectNulls={false} />
             </AreaChart>
           </ResponsiveContainer>
         ) : (
