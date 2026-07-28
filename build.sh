@@ -8,7 +8,7 @@ echo "========================================"
 
 # 设置变量
 BUILD_DIR="build"
-FRONTEND_DIR="frontend"
+FRONTEND_DIR="miaomiaowux-frontend"
 OUTPUT_DIR="${BUILD_DIR}/release"
 
 # 许可证响应验签公钥 — 从环境变量取,源码里默认空(防 fork 自编译能验签)。
@@ -39,7 +39,7 @@ fi
 echo ""
 echo "[1/3] 构建前端项目..."
 
-# 本 fork 维护新的前端源码,位于 $FRONTEND_DIR/。
+# 前端源码已迁到独立私有 repo,本仓库不再含前端 source。开发者需手动 clone 到 $FRONTEND_DIR/。
 # 已有 internal/web/dist/(从 release artifact 拉的 / CI 跑过的)+ SKIP_FRONTEND=1 → 跳过 npm,直接用现有 dist。
 if [ "${SKIP_FRONTEND:-0}" = "1" ]; then
     echo "SKIP_FRONTEND=1, 跳过前端 build,沿用 internal/web/dist 现有产物"
@@ -48,8 +48,16 @@ if [ "${SKIP_FRONTEND:-0}" = "1" ]; then
         echo "   要么 unset SKIP_FRONTEND 跑完整流程,要么先拉一份 dist 产物放进去"
         exit 1
     fi
+    if grep -R "/api/custom" internal/web/dist >/dev/null 2>&1; then
+        echo "❌ internal/web/dist 看起来包含 Custom UI 产物,拒绝嵌入到官方二进制"
+        echo "   请先放入官方 UI dist,或 unset SKIP_FRONTEND 使用 $FRONTEND_DIR 构建"
+        exit 1
+    fi
 elif [ ! -d "$FRONTEND_DIR" ]; then
     echo "❌ 前端源码不存在: $FRONTEND_DIR/"
+    echo ""
+    echo "本仓库不含前端 source,请先 clone 私有前端 repo:"
+    echo "  git clone git@github.com:<OWNER>/<FRONTEND-REPO>.git $FRONTEND_DIR"
     echo ""
     echo "或仅 build 后端(沿用现有 dist):"
     echo "  SKIP_FRONTEND=1 ./build.sh"
