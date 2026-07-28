@@ -1,6 +1,7 @@
 import type {
   AdminTrafficResponse,
   LoginResponse,
+  SystemMetrics,
   NodeTotalsResponse,
   RemoteServersResponse,
   Session,
@@ -84,6 +85,10 @@ export function fetchTrafficSummary(token: string) {
 
 export function fetchRemoteServers(token: string) {
   return request<RemoteServersResponse>("/api/admin/remote-servers", token);
+}
+
+export function fetchLocalSystemMetrics(token: string, signal?: AbortSignal) {
+  return request<SystemMetrics>("/api/admin/dashboard/system", token, { signal });
 }
 
 export function fetchNodeTotals(token: string, date: string) {

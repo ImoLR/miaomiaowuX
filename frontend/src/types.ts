@@ -46,9 +46,12 @@ export type RemoteServer = {
 
 export type SystemMetrics = {
   cpu_pct?: number;
+  cpu_cores?: number;
   loadavg?: string;
   mem_used?: number;
   mem_total?: number;
+  swap_used?: number;
+  swap_total?: number;
   disk_used?: number;
   disk_total?: number;
   has_cpu?: boolean;

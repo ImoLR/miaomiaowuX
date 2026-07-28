@@ -31,6 +31,7 @@ import {
   clearSession,
   controlRemoteService,
   fetchAdminTraffic,
+  fetchLocalSystemMetrics,
   fetchNodeTotals,
   fetchRemoteServers,
   fetchTrafficSummary,
@@ -48,6 +49,7 @@ import type {
   RealtimeSnapshot,
   RemoteServer,
   Session,
+  SystemMetrics as SystemMetricsData,
   TrafficSummary,
   UserTrafficSummary,
 } from "./types";
@@ -55,6 +57,7 @@ import "./styles.css";
 
 type DashboardState = {
   summary: TrafficSummary | null;
+  systemMetrics: SystemMetricsData | null;
   servers: RemoteServer[];
   nodes: NodeTrafficItem[];
   users: UserTrafficSummary[];
@@ -65,6 +68,7 @@ type DashboardState = {
 
 const emptyState: DashboardState = {
   summary: null,
+  systemMetrics: null,
   servers: [],
   nodes: [],
   users: [],
@@ -72,6 +76,8 @@ const emptyState: DashboardState = {
   userSpeeds: {},
   adminTraffic: null,
 };
+
+const SYSTEM_METRICS_REFRESH_MS = 5000;
 
 function App() {
   const [session, setSession] = useState<Session | null>(() => loadSession());
@@ -224,15 +230,16 @@ function Dashboard({
       const servers = remoteServers.servers ?? [];
       const speedResults = await Promise.allSettled(servers.map((server) => fetchUserSpeeds(session.token, server.id)));
 
-      setState({
+      setState((current) => ({
         summary,
+        systemMetrics: current.systemMetrics,
         servers,
         nodes: nodeTotals.items ?? [],
         users: users.users ?? [],
         userConnections: connections.connections ?? {},
         userSpeeds: aggregateUserSpeeds(speedResults),
         adminTraffic,
-      });
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Dashboard 加载失败");
     } finally {
@@ -243,6 +250,67 @@ function Dashboard({
   useEffect(() => {
     void loadDashboard();
   }, [loadDashboard]);
+
+  useEffect(() => {
+    if (activeTab !== "overview") return;
+
+    let stopped = false;
+    let timer: number | undefined;
+    let controller: AbortController | null = null;
+    let inFlight = false;
+
+    const clearTimer = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+
+    const scheduleNext = () => {
+      clearTimer();
+      if (stopped || document.visibilityState !== "visible") return;
+      timer = window.setTimeout(() => {
+        void refreshSystemMetrics();
+      }, SYSTEM_METRICS_REFRESH_MS);
+    };
+
+    const refreshSystemMetrics = async () => {
+      if (stopped || inFlight || document.visibilityState !== "visible") return;
+      inFlight = true;
+      controller?.abort();
+      controller = new AbortController();
+      try {
+        const metrics = await fetchLocalSystemMetrics(session.token, controller.signal);
+        if (!stopped) {
+          setState((current) => ({ ...current, systemMetrics: metrics }));
+        }
+      } catch {
+        // Keep the last successful system snapshot and retry on the next cycle.
+      } finally {
+        inFlight = false;
+        scheduleNext();
+      }
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void refreshSystemMetrics();
+      } else {
+        clearTimer();
+        controller?.abort();
+      }
+    };
+
+    void refreshSystemMetrics();
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      stopped = true;
+      clearTimer();
+      controller?.abort();
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [activeTab, session.token]);
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -396,7 +464,7 @@ function Dashboard({
       ) : (
         <div className="dashboard-content" aria-busy={loading}>
           <section className="metric-grid">
-            <SystemStatusCard server={selectedServer} servers={state.servers} selectedServerId={selectedServerId} onSelectServer={setSelectedServerId} />
+            <SystemStatusCard metrics={state.systemMetrics} />
             <XrayStatusCard server={selectedServer} busy={xrayActionBusy} onAction={runXrayAction} />
           </section>
 
@@ -425,41 +493,18 @@ function Dashboard({
   );
 }
 
-function SystemStatusCard({
-  server,
-  servers,
-  selectedServerId,
-  onSelectServer,
-}: {
-  server?: RemoteServer;
-  servers: RemoteServer[];
-  selectedServerId: number | null;
-  onSelectServer: (serverId: number) => void;
-}) {
-  const sys = server?.sysmetrics;
-  const hasCPU = sys?.has_cpu ?? sys?.HasCPU ?? false;
-  const hasMem = sys?.has_mem ?? sys?.HasMem ?? false;
-  const hasDisk = sys?.has_disk ?? sys?.HasDisk ?? false;
-  const cpu = metricFromPercent(hasCPU ? sys?.cpu_pct : undefined, "CPU", "-- Core");
-  const memory = metricFromUsage(hasMem ? sys?.mem_used : undefined, hasMem ? sys?.mem_total : undefined, "内存");
-  const swap = metricFromUsage(0, 0, "交换空间");
-  const disk = metricFromUsage(hasDisk ? sys?.disk_used : undefined, hasDisk ? sys?.disk_total : undefined, "存储");
+function SystemStatusCard({ metrics }: { metrics: SystemMetricsData | null }) {
+  const cpuDetail = metrics?.cpu_cores ? `${metrics.cpu_cores} Core` : "-- Core";
+  const cpu = metricFromPercent(metrics?.cpu_pct, "CPU", cpuDetail);
+  const memory = metricFromUsage(metrics?.mem_used, metrics?.mem_total, "内存");
+  const swap = metricFromUsage(metrics?.swap_used, metrics?.swap_total, "交换空间");
+  const disk = metricFromUsage(metrics?.disk_used, metrics?.disk_total, "存储");
 
   return (
     <section className="panel-card system-status-card" aria-label="系统状态">
       <div className="status-card-source">
         <span>系统状态</span>
-        {servers.length > 1 ? (
-          <select value={selectedServerId ?? ""} onChange={(event) => onSelectServer(Number(event.target.value))} aria-label="选择系统状态服务器">
-            {servers.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.name}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <strong>{server?.name ?? "暂无服务器"}</strong>
-        )}
+        <strong>主控本机</strong>
       </div>
       <div className="system-metric-grid">
         <SystemGauge metric={cpu} tone="blue" />
