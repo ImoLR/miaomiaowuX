@@ -13,7 +13,6 @@ import type {
 
 const SESSION_KEY = "mmwx-session";
 const MMWX_API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_MMWX_API_BASE_URL ?? "");
-const MMWXC_API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_MMWXC_API_BASE_URL ?? "https://mmwxc.imgamer.top");
 
 function normalizeBaseUrl(value: string) {
   return value.trim().replace(/\/+$/, "");
@@ -79,7 +78,7 @@ async function request<T>(path: string, token?: string, init?: RequestInit): Pro
 
 async function requestCustomApi<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
-  const response = await fetch(joinUrl(MMWXC_API_BASE_URL, path), { ...init, headers });
+  const response = await fetch(path, { ...init, headers });
   if (!response.ok) {
     let message = `请求失败 (${response.status})`;
     try {
@@ -114,7 +113,7 @@ export function fetchRemoteServers(token: string) {
 }
 
 export function fetchLocalSystemMetrics(_token: string, signal?: AbortSignal) {
-  return requestCustomApi<SystemMetrics>("/api/dashboard/system", { signal });
+  return requestCustomApi<SystemMetrics>("/api/custom/dashboard/system", { signal });
 }
 
 export function fetchNodeTotals(token: string, date: string) {

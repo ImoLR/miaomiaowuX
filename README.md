@@ -161,6 +161,12 @@ connection_mode: "auto"   # auto | websocket | http | pull
 - 前端：React 19 + Vite 7 + TanStack Router + TailwindCSS 4 + shadcn/ui
 - 单二进制部署，前端通过 Go embed 嵌入
 
+## Custom UI 开发
+
+`custom-ui` 分支的新前端通过 Vite 开发服务器预览。业务 API 继续共用正式妙妙屋X后端，系统状态只读指标由独立仓库 [ImoLR/mmwx-custom-api](https://github.com/ImoLR/mmwx-custom-api) 提供。
+
+开发服务器中的 `/api/custom/*` 会代理到本机 custom API 服务，默认目标为 `http://127.0.0.1:12890`，并转发为 custom API 的 `/api/*` 路径。不要在浏览器端硬编码 custom API 公网域名或本机地址。
+
 ## ⚠️ 免责声明
 
 - 本程序仅供学习交流使用，请勿用于非法用途
