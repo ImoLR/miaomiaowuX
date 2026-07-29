@@ -24,6 +24,12 @@ info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
 ok()    { echo -e "${GREEN}[ OK ]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 err()   { echo -e "${RED}[FAIL]${NC} $*" >&2; }
+require_interactive() {
+    if [[ ! -t 0 ]]; then
+        err "此操作需要交互式终端，请在 TTY 中运行。"
+        exit 9
+    fi
+}
 
 #─── 参数解析 ──────────────────────────────────────────────
 DB_PATH=""
@@ -146,7 +152,8 @@ find_db_via_scan() {
     while IFS= read -r line; do
         arr+=("$line"); echo "  [$i] $line"; ((i++))
     done <<<"$found"
-    echo -n "选择 [1-$((i-1))]: "; read -r idx
+    require_interactive
+    echo -n "选择 [1-$((i-1))]: "; read -r idx || { err "读取输入失败，已退出。"; exit 9; }
     if [[ "$idx" =~ ^[0-9]+$ ]] && (( idx >= 1 && idx <= ${#arr[@]} )); then
         echo "${arr[$((idx-1))]}"; return 0
     fi
@@ -236,7 +243,8 @@ TARGET=""
 if [[ ${#ADMINS[@]} -eq 1 ]]; then
     TARGET="${ADMINS[0]}"
     info "唯一管理员: ${BOLD}$TARGET${NC}"
-    echo -n "确认重置此用户的密码 [y/N]: "; read -r confirm
+    require_interactive
+    echo -n "确认重置此用户的密码 [y/N]: "; read -r confirm || { err "读取输入失败，已退出。"; exit 9; }
     [[ "$confirm" =~ ^[Yy]$ ]] || { warn "已取消"; exit 5; }
 else
     echo
@@ -245,8 +253,9 @@ else
         printf "  ${BOLD}[%d]${NC} %s\n" $((i+1)) "${ADMINS[$i]}"
     done
     echo
+    require_interactive
     while [[ -z "$TARGET" ]]; do
-        echo -n "选择要重置的管理员编号 [1-${#ADMINS[@]}]: "; read -r idx
+        echo -n "选择要重置的管理员编号 [1-${#ADMINS[@]}]: "; read -r idx || { err "读取输入失败，已退出。"; exit 9; }
         if [[ "$idx" =~ ^[0-9]+$ ]] && (( idx >= 1 && idx <= ${#ADMINS[@]} )); then
             TARGET="${ADMINS[$((idx-1))]}"
         else
@@ -261,10 +270,11 @@ fi
 # NEW_PASS=$(prompt_password) 会把提示文字一起捕获到密码里。
 prompt_password() {
     local pw1 pw2
+    require_interactive
     while true; do
-        printf "请输入新密码(至少 8 位,不显示): " >&2; read -rs pw1; echo >&2
+        printf "请输入新密码(至少 8 位,不显示): " >&2; read -rs pw1 || { echo >&2; err "读取输入失败，已退出。"; exit 9; }; echo >&2
         if (( ${#pw1} < 8 )); then warn "密码至少 8 位"; continue; fi
-        printf "再次输入新密码: " >&2; read -rs pw2; echo >&2
+        printf "再次输入新密码: " >&2; read -rs pw2 || { echo >&2; err "读取输入失败，已退出。"; exit 9; }; echo >&2
         if [[ "$pw1" != "$pw2" ]]; then warn "两次输入不一致,重来"; continue; fi
         printf '%s' "$pw1"; return 0
     done

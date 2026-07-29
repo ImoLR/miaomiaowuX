@@ -51,6 +51,13 @@ print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }
 
+require_interactive() {
+    if [ ! -t 0 ]; then
+        print_error "此操作需要交互式终端。请使用 -y 或在 TTY 中运行。"
+        exit 1
+    fi
+}
+
 # 检查权限并提示
 check_permission() {
     if [ "$EUID" -eq 0 ]; then
@@ -78,7 +85,12 @@ confirm_uninstall() {
         return 0
     fi
 
-    read -p "确定要继续吗？(y/N): " -n 1 -r
+    require_interactive
+    read -p "确定要继续吗？(y/N): " -n 1 -r || {
+        echo
+        print_error "读取输入失败，已退出。"
+        exit 1
+    }
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         print_info "已取消卸载"
@@ -161,7 +173,12 @@ remove_log_directory() {
         return 0
     fi
 
-    read -p "是否删除日志目录 /var/log/nginx？(y/N): " -n 1 -r
+    require_interactive
+    read -p "是否删除日志目录 /var/log/nginx？(y/N): " -n 1 -r || {
+        echo
+        print_error "读取输入失败，已退出。"
+        exit 1
+    }
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         if [ -d /var/log/nginx ]; then

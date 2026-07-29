@@ -46,7 +46,12 @@ Custom API。一条命令会自动下载两个最新 GitHub Release、校验其 
 两个 systemd 服务并启动它们：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/install.sh | sudo bash
+tmp_script="$(mktemp)"
+curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/install.sh -o "$tmp_script"
+sudo bash "$tmp_script" install
+status=$?
+rm -f "$tmp_script"
+exit "$status"
 ```
 
 安装的服务为：
@@ -65,24 +70,50 @@ curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/install.sh |
 ### Update
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/update.sh | sudo bash
+tmp_script="$(mktemp)"
+curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/update.sh -o "$tmp_script"
+sudo bash "$tmp_script"
+status=$?
+rm -f "$tmp_script"
+exit "$status"
 ```
 
 更新会下载新的 Fork Backend Release 和新的 `mmwx-custom` Release，保留
 `/etc/mmwx-custom` 中的数据库和配置；若新服务无法启动，会恢复上一个程序版本。
+
+固定版本更新示例：
+
+```bash
+tmp_script="$(mktemp)"
+curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/update.sh -o "$tmp_script"
+sudo FORK_VERSION=v0.3.8-fork.3 CUSTOM_VERSION=v1.0.3 bash "$tmp_script"
+status=$?
+rm -f "$tmp_script"
+exit "$status"
+```
 
 ### Uninstall
 
 卸载只删除开发程序、开发目录和两个 systemd 服务，保留数据库、配置和日志：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/uninstall.sh | sudo bash
+tmp_script="$(mktemp)"
+curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/uninstall.sh -o "$tmp_script"
+sudo bash "$tmp_script"
+status=$?
+rm -f "$tmp_script"
+exit "$status"
 ```
 
 `--purge` 当前也不会删除数据库、配置或日志，避免误删正式验证数据：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/uninstall.sh | sudo bash -s -- --purge
+tmp_script="$(mktemp)"
+curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/uninstall.sh -o "$tmp_script"
+sudo bash "$tmp_script" --purge
+status=$?
+rm -f "$tmp_script"
+exit "$status"
 ```
 
 Fork Release 资产必须由本 Fork 源码构建产生，不重新上传官方 Release 二进制。
