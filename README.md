@@ -51,8 +51,8 @@ curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/install.sh |
 
 安装的服务为：
 
-- `mmwx-custom-backend.service`: Fork Backend
-- `mmwx-custom.service`: Custom UI 和 Custom API
+- `mmwx-custom-backend.service`: Fork Backend，监听 `127.0.0.1:12891`
+- `mmwx-custom.service`: Custom UI 和 Custom API，监听 `127.0.0.1:12890`
 
 程序文件位于 `/usr/local/bin`，Custom UI 位于 `/opt/mmwx-custom`，数据库和
 配置位于 `/etc/mmwx-custom`。默认数据库独立；需要用于 UI/API 对比时，可在
@@ -60,7 +60,7 @@ curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/install.sh |
 选择由部署者明确配置，安装器不会自动共享正式数据库。
 
 开发域名的反向代理应指向 `127.0.0.1:12890`。该端口由 `mmwx-custom.service`
-提供 Custom UI，并将 `/api/*` 转发给配置的 Fork Backend。
+提供 Custom UI，并将 `/api/*` 转发给 `127.0.0.1:12891` 上的 Fork Backend。
 
 ### Update
 
@@ -73,13 +73,13 @@ curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/update.sh | 
 
 ### Uninstall
 
-默认卸载只删除程序和两个 systemd 服务，保留数据库和配置：
+卸载只删除开发程序、开发目录和两个 systemd 服务，保留数据库、配置和日志：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/uninstall.sh | sudo bash
 ```
 
-彻底卸载会同时删除程序、数据库和配置：
+`--purge` 当前也不会删除数据库、配置或日志，避免误删正式验证数据：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/uninstall.sh | sudo bash -s -- --purge
@@ -152,13 +152,14 @@ Docker 主控自身开 HTTPS 推荐用宿主机 agent 反代（容器内无 syst
 ```bash
 # Linux
 chmod +x mmwx-backend-linux-amd64
-./mmwx-backend-linux-amd64
+PORT=12891 ./mmwx-backend-linux-amd64
 
 # 或指定配置文件
-./mmwx-backend-linux-amd64 -c config.yaml
+PORT=12891 ./mmwx-backend-linux-amd64 -c config.yaml
 ```
 
-默认端口 `12889`，访问 `http://服务器IP:12889` 进入初始化向导。
+开发栈默认端口为 `12891`。`mmwxc.imgamer.top` 不直接指向该端口，而是通过
+`mmwx-custom.service` 的 `127.0.0.1:12890` 访问 Custom UI 和代理 API。
 
 ### 远程服务器部署
 

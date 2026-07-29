@@ -19,6 +19,8 @@ BACKEND_BINARY="$INSTALL_DIR/$BACKEND_SERVICE"
 CUSTOM_BINARY="$INSTALL_DIR/$CUSTOM_SERVICE"
 BACKEND_UNIT="/etc/systemd/system/$BACKEND_SERVICE.service"
 CUSTOM_UNIT="/etc/systemd/system/$CUSTOM_SERVICE.service"
+DEFAULT_BACKEND_ADDR="127.0.0.1:12891"
+DEFAULT_CUSTOM_ADDR="127.0.0.1:12890"
 
 TEMP_DIR=""
 BACKUP_DIR=""
@@ -48,7 +50,7 @@ detect_architecture() {
 
 install_dependencies() {
   local missing=0
-  for command in curl jq sha256sum tar systemctl; do
+  for command in curl jq sha256sum tar systemctl mv; do
     command -v "$command" >/dev/null 2>&1 || missing=1
   done
   if [ "$missing" -eq 0 ]; then
@@ -115,16 +117,20 @@ download_releases() {
 ensure_config_defaults() {
   mkdir -p "$DATA_DIR"
   chmod 700 "$DATA_DIR"
+  if [ -f "$CONFIG_FILE" ]; then
+    cp -a "$CONFIG_FILE" "$DATA_DIR/mmwx-custom.env.bak.$(date +%Y%m%d-%H%M%S)"
+  fi
   touch "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE"
 
-  ensure_config_value PORT "${PORT:-12889}"
+  ensure_config_value PORT "${PORT:-12891}"
   ensure_config_value DATABASE_PATH "${DATABASE_PATH:-$DATA_DIR/mmwx.db}"
   ensure_config_value LOG_LEVEL "${LOG_LEVEL:-info}"
   ensure_config_value MMWXC_API_LISTEN_ADDR "${MMWXC_API_LISTEN_ADDR:-127.0.0.1:12890}"
   ensure_config_value MMWXC_FRONTEND_DIR "$APP_DIR/frontend/dist"
-  ensure_config_value MMWX_API_TARGET "${MMWX_API_TARGET:-http://127.0.0.1:${PORT:-12889}}"
+  ensure_config_value MMWX_API_TARGET "${MMWX_API_TARGET:-http://127.0.0.1:${PORT:-12891}}"
   ensure_config_value MMWXC_ALLOWED_ORIGINS "${MMWXC_ALLOWED_ORIGINS:-http://127.0.0.1:12890,http://localhost:12890,https://mmwxc.imgamer.top}"
+  migrate_development_defaults
 }
 
 ensure_config_value() {
@@ -135,9 +141,72 @@ ensure_config_value() {
   fi
 }
 
+set_config_value() {
+  local name="$1"
+  local value="$2"
+  if grep -q "^${name}=" "$CONFIG_FILE"; then
+    sed -i "s|^${name}=.*|${name}=${value}|" "$CONFIG_FILE"
+  else
+    printf '%s=%s\n' "$name" "$value" >> "$CONFIG_FILE"
+  fi
+}
+
 config_value() {
   local name="$1"
   sed -n "s/^${name}=//p" "$CONFIG_FILE" | tail -n 1
+}
+
+migrate_development_defaults() {
+  local port
+  local target
+  port="$(config_value PORT)"
+  target="$(config_value MMWX_API_TARGET)"
+
+  if [ -z "${PORT:-}" ] && { [ -z "$port" ] || [ "$port" = "12889" ]; }; then
+    set_config_value PORT "12891"
+  fi
+  if [ -z "${MMWX_API_TARGET:-}" ] && { [ -z "$target" ] || [ "$target" = "http://127.0.0.1:12889" ] || [ "$target" = "http://localhost:12889" ]; }; then
+    set_config_value MMWX_API_TARGET "http://127.0.0.1:12891"
+  fi
+}
+
+listen_addr_from_port() {
+  printf '127.0.0.1:%s\n' "$(config_value PORT)"
+}
+
+host_from_addr() {
+  printf '%s\n' "${1%:*}"
+}
+
+port_from_addr() {
+  printf '%s\n' "${1##*:}"
+}
+
+port_is_open() {
+  local addr="$1"
+  local host
+  local port
+  host="$(host_from_addr "$addr")"
+  port="$(port_from_addr "$addr")"
+  if command -v ss >/dev/null 2>&1; then
+    ss -lnt "sport = :$port" 2>/dev/null | awk 'NR > 1 {print $4}' | grep -Eq "(^|:)$port$" && return 0
+  fi
+  timeout 1 bash -c "</dev/tcp/$host/$port" >/dev/null 2>&1
+}
+
+assert_ports_available() {
+  local backend_addr
+  local custom_addr
+  backend_addr="$(listen_addr_from_port)"
+  custom_addr="$(config_value MMWXC_API_LISTEN_ADDR)"
+  [ -n "$custom_addr" ] || custom_addr="$DEFAULT_CUSTOM_ADDR"
+
+  if port_is_open "$backend_addr"; then
+    die "开发 Fork Backend 端口被占用: $backend_addr"
+  fi
+  if port_is_open "$custom_addr"; then
+    die "开发 mmwx-custom 端口被占用: $custom_addr"
+  fi
 }
 
 write_systemd_units() {
@@ -192,6 +261,14 @@ backup_current_installation() {
   [ ! -d "$APP_DIR/frontend" ] || mv "$APP_DIR/frontend" "$BACKUP_DIR/frontend"
 }
 
+atomic_install() {
+  local src="$1"
+  local dst="$2"
+  local tmp="${dst}.new.$$"
+  install -m 0755 "$src" "$tmp"
+  mv "$tmp" "$dst"
+}
+
 restore_current_installation() {
   warn "恢复更新前的程序文件..."
   if [ -f "$BACKUP_DIR/backend" ]; then
@@ -216,15 +293,34 @@ stop_stack() {
 }
 
 start_stack() {
+  local backend_addr
+  local custom_addr
+  backend_addr="$(listen_addr_from_port)"
+  custom_addr="$(config_value MMWXC_API_LISTEN_ADDR)"
+
   systemctl daemon-reload
   systemctl enable "$BACKEND_SERVICE.service" "$CUSTOM_SERVICE.service" >/dev/null
   systemctl restart "$BACKEND_SERVICE.service"
+  wait_for_url "http://$backend_addr/api/setup/status"
   systemctl restart "$CUSTOM_SERVICE.service"
+  wait_for_url "http://$custom_addr/healthz"
+  curl -fsS --max-time 5 "http://$custom_addr/api/custom/dashboard/system" >/dev/null
+  curl -fsS --max-time 5 "http://$custom_addr/api/setup/status" >/dev/null
   systemctl is-active --quiet "$BACKEND_SERVICE.service"
   systemctl is-active --quiet "$CUSTOM_SERVICE.service"
-  local listen_addr
-  listen_addr="$(config_value MMWXC_API_LISTEN_ADDR)"
-  curl -fsS --max-time 5 "http://$listen_addr/healthz" >/dev/null
+}
+
+wait_for_url() {
+  local url="$1"
+  local i
+  for i in $(seq 1 40); do
+    if curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  warn "服务健康检查失败: $url"
+  return 1
 }
 
 install_or_update() {
@@ -241,9 +337,10 @@ install_or_update() {
   mkdir -p "$APP_DIR"
   backup_current_installation
   stop_stack
+  assert_ports_available
 
-  if ! install -m 0755 "$TEMP_DIR/$BACKEND_ASSET" "$BACKEND_BINARY" || \
-     ! install -m 0755 "$TEMP_DIR/custom-package/mmwx-custom" "$CUSTOM_BINARY" || \
+  if ! atomic_install "$TEMP_DIR/$BACKEND_ASSET" "$BACKEND_BINARY" || \
+     ! atomic_install "$TEMP_DIR/custom-package/mmwx-custom" "$CUSTOM_BINARY" || \
      ! mv "$TEMP_DIR/custom-package/frontend" "$APP_DIR/frontend"; then
     restore_current_installation
     start_stack || true
@@ -275,12 +372,11 @@ uninstall_stack() {
   rm -rf "$APP_DIR"
 
   if [ "$purge" = "--purge" ]; then
-    [ "$DATA_DIR" = "/etc/mmwx-custom" ] || die "拒绝删除非预期的数据目录。"
-    rm -rf "$DATA_DIR"
-    info "已彻底卸载程序、数据库和配置。"
+    warn "根据当前安全策略，--purge 不会删除数据库、配置或日志。"
   else
-    info "已删除程序，数据库和配置仍保留在 $DATA_DIR。"
+    :
   fi
+  info "已删除开发程序、开发目录和 systemd 服务，数据库、配置和日志仍保留在 $DATA_DIR。"
 }
 
 case "${1:-install}" in
