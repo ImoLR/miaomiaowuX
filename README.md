@@ -30,25 +30,63 @@
 ### 支持的客户端格式
 Clash(Meta) / Surge / Loon / Quantumult X / Shadowrocket / SingBox / Stash / Surfboard / V2Ray / Egern
 
-## 安装部署
+## 安装、更新与卸载
 
-### 方式 1：一键安装（推荐）
+### 正式环境
+
+`mmwx.imgamer.top` 使用官方 Release、官方 UI 和官方 Backend。请使用
+[官方仓库](https://github.com/iluobei/miaomiaowuX) 的 Release 与安装说明；本
+Fork 的安装器不会替换正式环境。
+
+### 开发环境 Install
+
+开发环境（例如 `mmwxc.imgamer.top`）使用本 Fork 的 Backend，以及
+[`mmwx-custom`](https://github.com/ImoLR/mmwx-custom) 提供的 Custom UI 和
+Custom API。一条命令会自动下载两个最新 GitHub Release、校验其 SHA-256、写入
+两个 systemd 服务并启动它们：
 
 ```bash
-curl -sL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/install.sh | sudo bash
 ```
 
-自动检测架构、下载最新版本、创建 systemd 服务。安装完成后访问 `http://服务器IP:12889` 进入初始化向导。
+安装的服务为：
 
-更新：
+- `mmwx-custom-backend.service`: Fork Backend
+- `mmwx-custom.service`: Custom UI 和 Custom API
+
+程序文件位于 `/usr/local/bin`，Custom UI 位于 `/opt/mmwx-custom`，数据库和
+配置位于 `/etc/mmwx-custom`。默认数据库独立；需要用于 UI/API 对比时，可在
+`/etc/mmwx-custom/mmwx-custom.env` 中将 `DATABASE_PATH` 指向已有数据库。该
+选择由部署者明确配置，安装器不会自动共享正式数据库。
+
+开发域名的反向代理应指向 `127.0.0.1:12890`。该端口由 `mmwx-custom.service`
+提供 Custom UI，并将 `/api/*` 转发给配置的 Fork Backend。
+
+### Update
+
 ```bash
-curl -sL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/install.sh | sudo bash -s update
+curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/update.sh | sudo bash
 ```
 
-卸载：
+更新会下载新的 Fork Backend Release 和新的 `mmwx-custom` Release，保留
+`/etc/mmwx-custom` 中的数据库和配置；若新服务无法启动，会恢复上一个程序版本。
+
+### Uninstall
+
+默认卸载只删除程序和两个 systemd 服务，保留数据库和配置：
+
 ```bash
-curl -sL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/install.sh | sudo bash -s uninstall
+curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/uninstall.sh | sudo bash
 ```
+
+彻底卸载会同时删除程序、数据库和配置：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/uninstall.sh | sudo bash -s -- --purge
+```
+
+所有构建产物均从 GitHub Release 下载；Fork 仓库不再手工维护 Custom UI 的
+`dist` 文件。
 
 ### 方式 2：Docker 部署
 

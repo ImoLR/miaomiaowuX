@@ -1,140 +1,151 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# miaomiaowuX Fork development-stack installer.
+#
+# It installs two independently released components:
+#   1. the official-style mmwx backend from this Fork's GitHub Release;
+#   2. the Custom UI and Custom API from ImoLR/mmwx-custom's GitHub Release.
 
-# 妙妙屋X - Xray 服务器管理与订阅拼车系统 安装脚本
-# 适用于 Debian/Ubuntu Linux 系统
+set -euo pipefail
 
-set -e
-
-# 配置
-GITHUB_REPO="iluobei/miaomiaowuX"
-VERSION=""  # 将自动获取最新版本
-BINARY_NAME=""  # 将根据架构自动设置
+FORK_RELEASE_REPO="ImoLR/miaomiaowuX"
+CUSTOM_RELEASE_REPO="ImoLR/mmwx-custom"
 INSTALL_DIR="/usr/local/bin"
-SERVICE_NAME="mmwx"
-DATA_DIR="/etc/mmwx"
-CONFIG_DIR="/etc/mmwx"
+APP_DIR="/opt/mmwx-custom"
+DATA_DIR="/etc/mmwx-custom"
+CONFIG_FILE="$DATA_DIR/mmwx-custom.env"
+BACKEND_SERVICE="mmwx-custom-backend"
+CUSTOM_SERVICE="mmwx-custom"
+BACKEND_BINARY="$INSTALL_DIR/$BACKEND_SERVICE"
+CUSTOM_BINARY="$INSTALL_DIR/$CUSTOM_SERVICE"
+BACKEND_UNIT="/etc/systemd/system/$BACKEND_SERVICE.service"
+CUSTOM_UNIT="/etc/systemd/system/$CUSTOM_SERVICE.service"
+LEGACY_CUSTOM_SERVICE="mmwx-custom-api"
 
-# 颜色输出
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+TEMP_DIR=""
+BACKUP_DIR=""
+LEGACY_CUSTOM_WAS_ACTIVE=0
 
-echo_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+info() { printf '[INFO] %s\n' "$*"; }
+warn() { printf '[WARN] %s\n' "$*" >&2; }
+die() { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
+
+cleanup() {
+  if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
+    rm -rf "$TEMP_DIR"
+  fi
+}
+trap cleanup EXIT
+
+require_root() {
+  [ "${EUID:-$(id -u)}" -eq 0 ] || die "请使用 root 权限运行此脚本。"
 }
 
-echo_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+detect_architecture() {
+  case "$(uname -m)" in
+    x86_64|amd64) ARCH="amd64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *) die "不支持的架构: $(uname -m)" ;;
+  esac
 }
 
-echo_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# 检查是否为 root 用户
-check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        echo_error "请使用 root 权限运行此脚本"
-        echo_info "使用命令: sudo bash install.sh"
-        exit 1
-    fi
-}
-
-# 检查系统架构
-check_architecture() {
-    ARCH=$(uname -m)
-    echo_info "检测到系统架构: $ARCH"
-
-    case "$ARCH" in
-        x86_64|amd64)
-            BINARY_NAME="mmwx-linux-amd64"
-            echo_info "使用 AMD64 版本"
-            ;;
-        aarch64|arm64)
-            BINARY_NAME="mmwx-linux-arm64"
-            echo_info "使用 ARM64 版本"
-            ;;
-        *)
-            echo_error "不支持的架构: $ARCH"
-            echo_error "支持的架构: x86_64 (amd64), aarch64 (arm64)"
-            exit 1
-            ;;
-    esac
-}
-
-# 安装依赖
 install_dependencies() {
-    echo_info "检查并安装依赖..."
-    apt-get update -qq
-    apt-get install -y wget curl jq systemd >/dev/null 2>&1
+  local missing=0
+  for command in curl jq sha256sum tar systemctl; do
+    command -v "$command" >/dev/null 2>&1 || missing=1
+  done
+  if [ "$missing" -eq 0 ]; then
+    return
+  fi
+  command -v apt-get >/dev/null 2>&1 || die "缺少 curl、jq、tar、sha256sum 或 systemctl，且当前系统没有 apt-get。"
+  info "安装下载和校验依赖..."
+  apt-get update -qq
+  apt-get install -y ca-certificates curl jq tar coreutils systemd
 }
 
-# 获取最新版本号
-get_latest_version() {
-    if [ -z "$VERSION" ]; then
-        echo_info "获取最新版本..."
-        VERSION=$(curl -sL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" | jq -r '.tag_name')
-        if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-            echo_error "无法获取最新版本号，请检查网络连接"
-            exit 1
-        fi
-        echo_info "最新版本: $VERSION"
-    fi
+latest_release_tag() {
+  local repository="$1"
+  local tag
+  tag="$(curl -fsSL "https://api.github.com/repos/$repository/releases/latest" | jq -er '.tag_name')" || die "无法获取 $repository 的最新 Release。"
+  printf '%s\n' "$tag"
 }
 
-# 下载二进制文件
-download_binary() {
-    echo_info "下载 $SERVICE_NAME $VERSION..."
-    DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${BINARY_NAME}"
-
-    cd /tmp
-    if wget -q --show-progress "$DOWNLOAD_URL" -O "$BINARY_NAME"; then
-        echo_info "下载完成"
-    else
-        echo_error "下载失败，请检查网络连接或版本号"
-        exit 1
-    fi
+download_asset() {
+  local repository="$1"
+  local tag="$2"
+  local asset="$3"
+  local destination="$4"
+  curl -fL --retry 3 --retry-delay 2 \
+    "https://github.com/$repository/releases/download/$tag/$asset" \
+    -o "$destination" || die "下载失败: $repository $tag/$asset"
+  [ -s "$destination" ] || die "下载内容为空: $asset"
 }
 
-# 安装二进制文件
-install_binary() {
-    echo_info "安装二进制文件..."
-    chmod +x "/tmp/$BINARY_NAME"
-    mv "/tmp/$BINARY_NAME" "$INSTALL_DIR/$SERVICE_NAME"
-    echo_info "已安装到 $INSTALL_DIR/$SERVICE_NAME"
+verify_asset() {
+  local checksum_file="$1"
+  local asset_path="$2"
+  local asset_name
+  local expected
+  asset_name="$(basename "$asset_path")"
+  expected="$(awk -v name="$asset_name" '$2 == name || $2 == "*" name { print $1; exit }' "$checksum_file")"
+  [ -n "$expected" ] || die "校验文件未包含 $asset_name"
+  printf '%s  %s\n' "$expected" "$asset_path" | sha256sum -c - >/dev/null || die "校验失败: $asset_name"
 }
 
-# 创建数据目录
-create_directories() {
-    echo_info "创建数据目录..."
-    mkdir -p "$DATA_DIR"
-    mkdir -p "$CONFIG_DIR"
-    chmod 755 "$DATA_DIR"
-    chmod 755 "$CONFIG_DIR"
+download_releases() {
+  TEMP_DIR="$(mktemp -d)"
+  FORK_TAG="${FORK_VERSION:-$(latest_release_tag "$FORK_RELEASE_REPO")}"
+  CUSTOM_TAG="${CUSTOM_VERSION:-$(latest_release_tag "$CUSTOM_RELEASE_REPO")}"
+  BACKEND_ASSET="mmwx-linux-$ARCH"
+  CUSTOM_ASSET="mmwx-custom-linux-$ARCH.tar.gz"
+
+  info "下载 Fork Release: $FORK_TAG"
+  download_asset "$FORK_RELEASE_REPO" "$FORK_TAG" "$BACKEND_ASSET" "$TEMP_DIR/$BACKEND_ASSET"
+  download_asset "$FORK_RELEASE_REPO" "$FORK_TAG" "checksums.txt" "$TEMP_DIR/fork-checksums.txt"
+  verify_asset "$TEMP_DIR/fork-checksums.txt" "$TEMP_DIR/$BACKEND_ASSET"
+
+  info "下载 mmwx-custom Release: $CUSTOM_TAG"
+  download_asset "$CUSTOM_RELEASE_REPO" "$CUSTOM_TAG" "$CUSTOM_ASSET" "$TEMP_DIR/$CUSTOM_ASSET"
+  download_asset "$CUSTOM_RELEASE_REPO" "$CUSTOM_TAG" "checksums.txt" "$TEMP_DIR/custom-checksums.txt"
+  verify_asset "$TEMP_DIR/custom-checksums.txt" "$TEMP_DIR/$CUSTOM_ASSET"
+
+  mkdir -p "$TEMP_DIR/custom-package"
+  tar -xzf "$TEMP_DIR/$CUSTOM_ASSET" -C "$TEMP_DIR/custom-package"
+  [ -x "$TEMP_DIR/custom-package/mmwx-custom" ] || die "mmwx-custom Release 缺少可执行文件。"
+  [ -f "$TEMP_DIR/custom-package/frontend/dist/index.html" ] || die "mmwx-custom Release 缺少 Custom UI。"
 }
 
-# 创建 systemd 服务
-create_systemd_service() {
-    echo_info "创建 systemd 服务..."
+ensure_config_defaults() {
+  mkdir -p "$DATA_DIR"
+  chmod 700 "$DATA_DIR"
+  touch "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
 
-    # 询问端口号（支持非交互式环境）
-    echo ""
-    if [ -t 0 ]; then
-        # 交互式环境，可以读取用户输入
-        read -p "请输入端口号（默认 12889，直接回车使用默认值）: " PORT_INPUT
-        if [ -z "$PORT_INPUT" ]; then
-            PORT_INPUT=12889
-        fi
-    else
-        # 非交互式环境（如管道），使用默认值
-        PORT_INPUT=${PORT:-12889}
-        echo_info "使用端口: $PORT_INPUT"
-    fi
+  ensure_config_value PORT "${PORT:-12889}"
+  ensure_config_value DATABASE_PATH "${DATABASE_PATH:-$DATA_DIR/mmwx.db}"
+  ensure_config_value LOG_LEVEL "${LOG_LEVEL:-info}"
+  ensure_config_value MMWXC_API_LISTEN_ADDR "${MMWXC_API_LISTEN_ADDR:-127.0.0.1:12890}"
+  ensure_config_value MMWXC_FRONTEND_DIR "$APP_DIR/frontend/dist"
+  ensure_config_value MMWX_API_TARGET "${MMWX_API_TARGET:-http://127.0.0.1:${PORT:-12889}}"
+  ensure_config_value MMWXC_ALLOWED_ORIGINS "${MMWXC_ALLOWED_ORIGINS:-http://127.0.0.1:12890,http://localhost:12890,https://mmwxc.imgamer.top}"
+}
 
-    cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
+ensure_config_value() {
+  local name="$1"
+  local value="$2"
+  if ! grep -q "^${name}=" "$CONFIG_FILE"; then
+    printf '%s=%s\n' "$name" "$value" >> "$CONFIG_FILE"
+  fi
+}
+
+config_value() {
+  local name="$1"
+  sed -n "s/^${name}=//p" "$CONFIG_FILE" | tail -n 1
+}
+
+write_systemd_units() {
+  cat > "$BACKEND_UNIT" <<EOF
 [Unit]
-Description=妙妙屋X - Xray 服务器管理与订阅拼车系统
+Description=miaomiaowuX Fork backend for the Custom development stack
 After=network.target
 Wants=network-online.target
 
@@ -142,19 +153,10 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=$DATA_DIR
-ExecStart=$INSTALL_DIR/$SERVICE_NAME
+EnvironmentFile=$CONFIG_FILE
+ExecStart=$BACKEND_BINARY
 Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=$SERVICE_NAME
-
-# 环境变量
-Environment="PORT=$PORT_INPUT"
-Environment="DATABASE_PATH=$DATA_DIR/mmwx.db"
-Environment="LOG_LEVEL=info"
-
-# 安全选项
 NoNewPrivileges=true
 PrivateTmp=true
 
@@ -162,317 +164,154 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    echo_info "systemd 服务已创建（端口: $PORT_INPUT）"
+  cat > "$CUSTOM_UNIT" <<EOF
+[Unit]
+Description=miaomiaowuX Custom UI and API
+After=$BACKEND_SERVICE.service network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$APP_DIR
+EnvironmentFile=$CONFIG_FILE
+ExecStart=$CUSTOM_BINARY
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
-# 启动服务
-start_service() {
-    echo_info "启动服务..."
-    systemctl enable ${SERVICE_NAME}.service
-    systemctl start ${SERVICE_NAME}.service
-    sleep 2
-
-    if systemctl is-active --quiet ${SERVICE_NAME}.service; then
-        echo_info "服务启动成功！"
-        return 0
-    else
-        echo_error "服务启动失败"
-        return 1
-    fi
+backup_current_installation() {
+  BACKUP_DIR="$APP_DIR/backups/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$BACKUP_DIR"
+  [ ! -f "$BACKEND_BINARY" ] || cp -a "$BACKEND_BINARY" "$BACKUP_DIR/backend"
+  [ ! -f "$CUSTOM_BINARY" ] || cp -a "$CUSTOM_BINARY" "$BACKUP_DIR/custom"
+  [ ! -d "$APP_DIR/frontend" ] || mv "$APP_DIR/frontend" "$BACKUP_DIR/frontend"
 }
 
-# 显示状态
-show_status() {
-    # 从 systemd 服务文件中读取端口号
-    CONFIGURED_PORT=$(grep "Environment=\"PORT=" /etc/systemd/system/${SERVICE_NAME}.service | sed 's/.*PORT=\([0-9]*\).*/\1/')
-    CONFIGURED_PORT=${CONFIGURED_PORT:-12889}
-
-    echo ""
-    echo "======================================"
-    echo_info "妙妙屋X 安装完成！"
-    echo "======================================"
-    echo ""
-    echo "📦 安装位置: $INSTALL_DIR/$SERVICE_NAME"
-    echo "💾 数据目录: $DATA_DIR"
-    echo "🌐 访问地址: http://$(hostname -I | awk '{print $1}'):$CONFIGURED_PORT"
-    echo ""
-    echo "常用命令:"
-    echo "  启动服务: systemctl start $SERVICE_NAME"
-    echo "  停止服务: systemctl stop $SERVICE_NAME"
-    echo "  重启服务: systemctl restart $SERVICE_NAME"
-    echo "  查看状态: systemctl status $SERVICE_NAME"
-    echo "  查看日志: journalctl -u $SERVICE_NAME -f"
-    echo "  更新版本: curl -sL https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh | sudo bash -s update"
-    echo "  覆盖安装: curl -sL https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh | sudo bash -s reinstall"
-    echo "  卸载服务: curl -sL https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh | sudo bash -s uninstall"
-    echo ""
-    echo "⚠️  首次访问需要完成初始化配置"
-    echo ""
+restore_current_installation() {
+  warn "恢复更新前的程序文件..."
+  if [ -f "$BACKUP_DIR/backend" ]; then
+    install -m 0755 "$BACKUP_DIR/backend" "$BACKEND_BINARY"
+  else
+    rm -f "$BACKEND_BINARY"
+  fi
+  if [ -f "$BACKUP_DIR/custom" ]; then
+    install -m 0755 "$BACKUP_DIR/custom" "$CUSTOM_BINARY"
+  else
+    rm -f "$CUSTOM_BINARY"
+  fi
+  if [ -d "$BACKUP_DIR/frontend" ]; then
+    rm -rf "$APP_DIR/frontend"
+    mv "$BACKUP_DIR/frontend" "$APP_DIR/frontend"
+  fi
+  if [ "$LEGACY_CUSTOM_WAS_ACTIVE" -eq 1 ]; then
+    systemctl restart "$LEGACY_CUSTOM_SERVICE.service" || true
+  fi
 }
 
-# 更新服务
-update_service() {
-    echo_info "开始更新妙妙屋X..."
-    echo ""
-
-    # 检查服务是否已安装
-    if [ ! -f "$INSTALL_DIR/$SERVICE_NAME" ]; then
-        echo_error "未检测到已安装的服务，请先使用安装模式"
-        exit 1
-    fi
-
-    # 显示当前版本
-    if [ -f "$DATA_DIR/.version" ]; then
-        CURRENT_VERSION=$(cat "$DATA_DIR/.version")
-        echo_info "当前版本: $CURRENT_VERSION"
-    fi
-    echo_info "目标版本: $VERSION"
-    echo ""
-
-    # 停止服务
-    echo_info "停止服务..."
-    systemctl stop ${SERVICE_NAME}.service || true
-
-    # 备份当前二进制文件
-    if [ -f "$INSTALL_DIR/$SERVICE_NAME" ]; then
-        echo_info "备份当前版本..."
-        cp "$INSTALL_DIR/$SERVICE_NAME" "$INSTALL_DIR/${SERVICE_NAME}.bak"
-    fi
-
-    # 下载并安装新版本
-    download_binary
-    install_binary
-
-    # 保存版本信息
-    echo "$VERSION" > "$DATA_DIR/.version"
-
-    # 询问是否修改端口（支持非交互式环境）
-    CURRENT_PORT=$(grep "Environment=\"PORT=" /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null | sed 's/.*PORT=\([0-9]*\).*/\1/')
-    CURRENT_PORT=${CURRENT_PORT:-12889}
-    echo ""
-    if [ -t 0 ]; then
-        # 交互式环境
-        read -p "请输入端口号（默认 $CURRENT_PORT，直接回车使用默认值）: " PORT_INPUT
-        if [ -z "$PORT_INPUT" ]; then
-            PORT_INPUT=$CURRENT_PORT
-        fi
-    else
-        # 非交互式环境，保持当前端口或使用环境变量
-        PORT_INPUT=${PORT:-$CURRENT_PORT}
-        echo_info "使用端口: $PORT_INPUT"
-    fi
-
-    # 更新 systemd 服务文件中的端口
-    sed -i "s/Environment=\"PORT=[0-9]*\"/Environment=\"PORT=$PORT_INPUT\"/" /etc/systemd/system/${SERVICE_NAME}.service
-
-    # 重新加载 systemd 配置
-    systemctl daemon-reload
-
-    # 启动服务
-    if start_service; then
-        echo ""
-        echo "======================================"
-        echo_info "更新完成！"
-        echo "======================================"
-        echo ""
-        echo "📦 版本: $VERSION"
-        echo "🌐 访问地址: http://$(hostname -I | awk '{print $1}'):$PORT_INPUT"
-        echo ""
-        echo "如遇问题可回滚到备份版本:"
-        echo "  sudo systemctl stop $SERVICE_NAME"
-        echo "  sudo mv $INSTALL_DIR/${SERVICE_NAME}.bak $INSTALL_DIR/$SERVICE_NAME"
-        echo "  sudo systemctl start $SERVICE_NAME"
-        echo ""
-    else
-        echo_error "更新后服务启动失败，正在回滚..."
-        mv "$INSTALL_DIR/${SERVICE_NAME}.bak" "$INSTALL_DIR/$SERVICE_NAME"
-        systemctl start ${SERVICE_NAME}.service
-        echo_error "已回滚到之前版本，请查看日志: journalctl -u $SERVICE_NAME -n 50"
-        exit 1
-    fi
+stop_stack() {
+  if systemctl is-active --quiet "$LEGACY_CUSTOM_SERVICE.service" 2>/dev/null; then
+    LEGACY_CUSTOM_WAS_ACTIVE=1
+    systemctl stop "$LEGACY_CUSTOM_SERVICE.service"
+  fi
+  systemctl stop "$CUSTOM_SERVICE.service" 2>/dev/null || true
+  systemctl stop "$BACKEND_SERVICE.service" 2>/dev/null || true
 }
 
-# 卸载服务
-uninstall_service() {
-    echo_info "开始卸载妙妙屋X..."
-    echo ""
-
-    # 检查服务是否已安装
-    if [ ! -f "$INSTALL_DIR/$SERVICE_NAME" ]; then
-        echo_error "未检测到已安装的服务"
-        exit 1
-    fi
-
-    # 显示当前版本
-    if [ -f "$DATA_DIR/.version" ]; then
-        CURRENT_VERSION=$(cat "$DATA_DIR/.version")
-        echo_info "当前版本: $CURRENT_VERSION"
-        echo ""
-    fi
-
-    # 停止并禁用服务
-    echo_info "停止并禁用服务..."
-    systemctl stop ${SERVICE_NAME}.service || true
-    systemctl disable ${SERVICE_NAME}.service || true
-    echo_info "✓ 服务已停止"
-    echo ""
-
-    # 询问是否保留配置和数据
-    KEEP_DATA=false
-    if [ -t 0 ]; then
-        # 交互式环境
-        echo "是否保留配置和数据？"
-        echo "  1) 完全删除（删除所有文件和数据）"
-        echo "  2) 保留数据（保留 $DATA_DIR 和 $CONFIG_DIR 目录）"
-        read -p "请选择 (1/2，默认 2): " CHOICE
-
-        if [ "$CHOICE" = "1" ]; then
-            KEEP_DATA=false
-        else
-            KEEP_DATA=true
-        fi
-    else
-        # 非交互式环境，检查环境变量
-        if [ "$KEEP_DATA" != "false" ]; then
-            KEEP_DATA=true
-        fi
-        if [ "$KEEP_DATA" = "true" ]; then
-            echo_info "保留数据模式"
-        else
-            echo_info "完全删除模式"
-        fi
-    fi
-    echo ""
-
-    # 删除 systemd 服务文件
-    echo_info "删除 systemd 服务..."
-    rm -f /etc/systemd/system/${SERVICE_NAME}.service
-    systemctl daemon-reload
-    echo_info "✓ systemd 服务已删除"
-    echo ""
-
-    # 删除二进制文件
-    echo_info "删除程序文件..."
-    rm -f "$INSTALL_DIR/$SERVICE_NAME" "$INSTALL_DIR/${SERVICE_NAME}.bak"
-    echo_info "✓ 程序文件已删除"
-    echo ""
-
-    # 根据选择删除或保留数据
-    if [ "$KEEP_DATA" = "false" ]; then
-        echo_info "删除数据和配置..."
-        rm -rf "$DATA_DIR" "$CONFIG_DIR"
-        echo_info "✓ 数据和配置已删除"
-        echo ""
-        echo "======================================"
-        echo_info "卸载完成！所有文件已删除"
-        echo "======================================"
-    else
-        echo_info "保留数据目录: $DATA_DIR"
-        echo_info "保留配置目录: $CONFIG_DIR"
-        echo ""
-        echo "======================================"
-        echo_info "卸载完成！配置和数据已保留"
-        echo "======================================"
-        echo ""
-        echo "如需重新安装:"
-        echo "  curl -sL https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh | sudo bash"
-    fi
-    echo ""
+start_stack() {
+  systemctl daemon-reload
+  systemctl enable "$BACKEND_SERVICE.service" "$CUSTOM_SERVICE.service" >/dev/null
+  systemctl restart "$BACKEND_SERVICE.service"
+  systemctl restart "$CUSTOM_SERVICE.service"
+  systemctl is-active --quiet "$BACKEND_SERVICE.service"
+  systemctl is-active --quiet "$CUSTOM_SERVICE.service"
+  local listen_addr
+  listen_addr="$(config_value MMWXC_API_LISTEN_ADDR)"
+  curl -fsS --max-time 5 "http://$listen_addr/healthz" >/dev/null
 }
 
-# 覆盖安装（全量重装，保留数据）
-reinstall_service() {
-    echo_info "开始覆盖安装妙妙屋X..."
-    echo ""
+install_or_update() {
+  local mode="$1"
+  if [ "$mode" = "update" ] && [ ! -f "$BACKEND_BINARY" ]; then
+    die "未检测到已安装的开发栈，请先运行 install.sh。"
+  fi
 
-    # 停止已有服务
-    if systemctl is-active --quiet ${SERVICE_NAME}.service 2>/dev/null; then
-        echo_info "停止现有服务..."
-        systemctl stop ${SERVICE_NAME}.service || true
-    fi
+  require_root
+  detect_architecture
+  install_dependencies
+  download_releases
+  ensure_config_defaults
+  mkdir -p "$APP_DIR"
+  backup_current_installation
+  stop_stack
 
-    # 备份当前二进制文件
-    if [ -f "$INSTALL_DIR/$SERVICE_NAME" ]; then
-        echo_info "备份当前版本..."
-        cp "$INSTALL_DIR/$SERVICE_NAME" "$INSTALL_DIR/${SERVICE_NAME}.bak"
-    fi
+  if ! install -m 0755 "$TEMP_DIR/$BACKEND_ASSET" "$BACKEND_BINARY" || \
+     ! install -m 0755 "$TEMP_DIR/custom-package/mmwx-custom" "$CUSTOM_BINARY" || \
+     ! mv "$TEMP_DIR/custom-package/frontend" "$APP_DIR/frontend"; then
+    restore_current_installation
+    start_stack || true
+    die "安装程序文件失败，已恢复原版本。"
+  fi
 
-    # 全量覆盖：下载、安装、重建目录和服务
-    download_binary
-    install_binary
-    create_directories
-    create_systemd_service
+  write_systemd_units
+  if ! start_stack; then
+    restore_current_installation
+    start_stack || true
+    die "新版本启动失败，已恢复原版本。"
+  fi
 
-    # 保存版本信息
-    echo "$VERSION" > "$DATA_DIR/.version"
+  if [ "$LEGACY_CUSTOM_WAS_ACTIVE" -eq 1 ]; then
+    systemctl disable "$LEGACY_CUSTOM_SERVICE.service" >/dev/null 2>&1 || true
+    info "已将旧服务 $LEGACY_CUSTOM_SERVICE.service 迁移到 $CUSTOM_SERVICE.service"
+  fi
 
-    if start_service; then
-        show_status
-        echo_info "覆盖安装完成！数据已保留。"
-        echo ""
-        echo "如遇问题可回滚到备份版本:"
-        echo "  sudo systemctl stop $SERVICE_NAME"
-        echo "  sudo mv $INSTALL_DIR/${SERVICE_NAME}.bak $INSTALL_DIR/$SERVICE_NAME"
-        echo "  sudo systemctl start $SERVICE_NAME"
-        echo ""
-    else
-        echo_error "覆盖安装后服务启动失败，正在回滚..."
-        if [ -f "$INSTALL_DIR/${SERVICE_NAME}.bak" ]; then
-            mv "$INSTALL_DIR/${SERVICE_NAME}.bak" "$INSTALL_DIR/$SERVICE_NAME"
-            systemctl start ${SERVICE_NAME}.service || true
-            echo_error "已回滚到之前版本"
-        fi
-        echo_error "请查看日志: journalctl -u $SERVICE_NAME -n 50"
-        exit 1
-    fi
+  printf '%s\n' "$FORK_TAG" > "$DATA_DIR/fork-version"
+  printf '%s\n' "$CUSTOM_TAG" > "$DATA_DIR/custom-version"
+  info "完成：Fork Backend $FORK_TAG + mmwx-custom $CUSTOM_TAG"
+  info "数据和配置保存在 $DATA_DIR"
 }
 
-# 主函数
-main() {
-    # 检查命令行参数
-    if [ "$1" = "update" ]; then
-        echo_info "进入更新模式..."
-        check_root
-        check_architecture
-        install_dependencies
-        get_latest_version
-        update_service
-    elif [ "$1" = "reinstall" ]; then
-        echo_info "进入覆盖安装模式..."
-        check_root
-        check_architecture
-        install_dependencies
-        get_latest_version
-        reinstall_service
-    elif [ "$1" = "uninstall" ]; then
-        echo_info "进入卸载模式..."
-        check_root
-        uninstall_service
-    else
-        echo_info "开始安装妙妙屋X..."
-        echo ""
+uninstall_stack() {
+  local purge="${1:-}"
+  require_root
+  stop_stack
+  systemctl disable "$CUSTOM_SERVICE.service" "$BACKEND_SERVICE.service" 2>/dev/null || true
+  rm -f "$CUSTOM_UNIT" "$BACKEND_UNIT" "$CUSTOM_BINARY" "$BACKEND_BINARY"
+  systemctl daemon-reload
 
-        check_root
-        check_architecture
-        install_dependencies
-        get_latest_version
-        download_binary
-        install_binary
-        create_directories
-        create_systemd_service
+  [ "$APP_DIR" = "/opt/mmwx-custom" ] || die "拒绝删除非预期的程序目录。"
+  rm -rf "$APP_DIR"
 
-        # 保存版本信息
-        echo "$VERSION" > "$DATA_DIR/.version"
-
-        if start_service; then
-            show_status
-        else
-            echo_error "安装过程中出现错误，请查看日志: journalctl -u $SERVICE_NAME -n 50"
-            exit 1
-        fi
-    fi
+  if [ "$purge" = "--purge" ]; then
+    [ "$DATA_DIR" = "/etc/mmwx-custom" ] || die "拒绝删除非预期的数据目录。"
+    rm -rf "$DATA_DIR"
+    info "已彻底卸载程序、数据库和配置。"
+  else
+    info "已删除程序，数据库和配置仍保留在 $DATA_DIR。"
+  fi
 }
 
-# 运行主函数
-main "$@"
+case "${1:-install}" in
+  install)
+    install_or_update install
+    ;;
+  update)
+    install_or_update update
+    ;;
+  reinstall)
+    install_or_update install
+    ;;
+  uninstall)
+    uninstall_stack "${2:-}"
+    ;;
+  *)
+    echo "Usage: $0 [install|update|reinstall|uninstall [--purge]]" >&2
+    exit 1
+    ;;
+esac
