@@ -40,7 +40,7 @@ Fork 的安装器不会替换正式环境。
 
 ### 开发环境 Install
 
-开发环境（例如 `mmwxc.imgamer.top`）使用本 Fork 的 Backend，以及
+开发环境（例如 `mmwxc.imgamer.top`）使用本 Fork 自己编译发布的 Backend，以及
 [`mmwx-custom`](https://github.com/ImoLR/mmwx-custom) 提供的 Custom UI 和
 Custom API。一条命令会自动下载两个最新 GitHub Release、校验其 SHA-256、写入
 两个 systemd 服务并启动它们：
@@ -85,8 +85,18 @@ curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/uninstall.sh
 curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/uninstall.sh | sudo bash -s -- --purge
 ```
 
-所有构建产物均从 GitHub Release 下载；Fork 仓库不再手工维护 Custom UI 的
-`dist` 文件。
+Fork Release 资产必须由本 Fork 源码构建产生，不重新上传官方 Release 二进制。
+Fork Release 只发布 Backend，例如：
+
+```text
+mmwx-backend-linux-amd64
+mmwx-backend-linux-arm64
+checksums.txt
+```
+
+Fork 版本号跟随官方基线，例如 `v0.3.8-fork.1`。Custom UI 和 Custom API 只从
+`mmwx-custom` Release 获取，并使用 `v1.0.0`、`v1.0.1` 这类独立版本号；Fork
+仓库不再手工维护 Custom UI 的 `dist` 文件。
 
 ### 方式 2：Docker 部署
 
@@ -135,17 +145,17 @@ Docker 主控自身开 HTTPS 推荐用宿主机 agent 反代（容器内无 syst
 
 > 备选：容器内置 nginx 也能开 HTTPS（镜像已预装），但需 host 网络或额外映射 80/443，不推荐。
 
-### 方式 3：二进制部署
+### 方式 3：Fork Backend 二进制
 
-从 [Releases](https://github.com/iluobei/miaomiaowuX/releases) 下载对应平台的二进制文件：
+从本 Fork 的 [Releases](https://github.com/ImoLR/miaomiaowuX/releases) 下载对应平台的 Backend 二进制文件：
 
 ```bash
 # Linux
-chmod +x mmwx-linux-amd64
-./mmwx-linux-amd64
+chmod +x mmwx-backend-linux-amd64
+./mmwx-backend-linux-amd64
 
 # 或指定配置文件
-./mmwx-linux-amd64 -c config.yaml
+./mmwx-backend-linux-amd64 -c config.yaml
 ```
 
 默认端口 `12889`，访问 `http://服务器IP:12889` 进入初始化向导。

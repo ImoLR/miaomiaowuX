@@ -1,22 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Publish a Fork installer release without rebuilding the official embedded UI.
-# The release assets are verified copies of an official upstream Release; the
-# Custom UI/API is delivered separately by ImoLR/mmwx-custom.
+# Publish a Fork Backend release from this repository's own source.
+# This script never downloads or republishes upstream official binaries.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FORK_REPOSITORY="ImoLR/miaomiaowuX"
-UPSTREAM_REPOSITORY="iluobei/miaomiaowuX"
-BUNDLE_TAG="${1:-}"
-UPSTREAM_TAG="${2:-v0.3.8}"
+TAG="${1:-}"
+LICENSE_PKG="miaomiaowux/internal/license"
 
-if [[ ! "$BUNDLE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Usage: $0 vX.Y.Z [official-upstream-tag]" >&2
+if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-fork\.[0-9]+$ ]]; then
+  echo "Usage: $0 vX.Y.Z-fork.N" >&2
   exit 1
 fi
 
 cd "$ROOT_DIR"
+
+for command in gh git sha256sum; do
+  command -v "$command" >/dev/null 2>&1 || {
+    echo "Missing required command: $command" >&2
+    exit 1
+  }
+done
+
+if ! command -v go >/dev/null 2>&1; then
+  if [ -x /usr/local/go/bin/go ]; then
+    export PATH="/usr/local/go/bin:$PATH"
+  else
+    echo "Missing required command: go" >&2
+    exit 1
+  fi
+fi
+
 git diff --quiet && git diff --cached --quiet || {
   echo "Working tree must be clean before creating a release." >&2
   exit 1
@@ -25,41 +40,50 @@ git diff --quiet && git diff --cached --quiet || {
   echo "Release must be created from main." >&2
   exit 1
 }
-! git rev-parse "$BUNDLE_TAG" >/dev/null 2>&1 || {
-  echo "Tag already exists locally: $BUNDLE_TAG" >&2
+! git rev-parse "$TAG" >/dev/null 2>&1 || {
+  echo "Tag already exists locally: $TAG" >&2
   exit 1
 }
-! git ls-remote --exit-code --tags origin "refs/tags/$BUNDLE_TAG" >/dev/null 2>&1 || {
-  echo "Tag already exists on origin: $BUNDLE_TAG" >&2
+! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1 || {
+  echo "Tag already exists on origin: $TAG" >&2
   exit 1
 }
-! gh release view "$BUNDLE_TAG" --repo "$FORK_REPOSITORY" >/dev/null 2>&1 || {
-  echo "Release already exists: $BUNDLE_TAG" >&2
+! gh release view "$TAG" --repo "$FORK_REPOSITORY" >/dev/null 2>&1 || {
+  echo "Release already exists: $TAG" >&2
   exit 1
 }
+
+if [ -z "${LICENSE_PUB_KEY:-}" ]; then
+  echo "Warning: LICENSE_PUB_KEY is empty. Built binaries may not validate PRO license responses." >&2
+fi
 
 TEMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TEMP_DIR"' EXIT
-gh release download "$UPSTREAM_TAG" --repo "$UPSTREAM_REPOSITORY" \
-  --pattern 'mmwx-linux-amd64' \
-  --pattern 'mmwx-linux-arm64' \
-  --pattern 'checksums.txt' \
-  --dir "$TEMP_DIR"
+RELEASE_DIR="$TEMP_DIR/release"
+mkdir -p "$RELEASE_DIR"
 
-for asset in mmwx-linux-amd64 mmwx-linux-arm64; do
-  expected="$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$TEMP_DIR/checksums.txt")"
-  [ -n "$expected" ] || { echo "Missing checksum for $asset" >&2; exit 1; }
-  printf '%s  %s\n' "$expected" "$TEMP_DIR/$asset" | sha256sum -c -
+LDFLAGS="-s -w -X '${LICENSE_PKG}.licenseSignPubKeyB64=${LICENSE_PUB_KEY:-}'"
+for arch in amd64 arm64; do
+  output="mmwx-backend-linux-$arch"
+  GOOS=linux GOARCH="$arch" CGO_ENABLED=0 go build -trimpath \
+    -ldflags="$LDFLAGS" \
+    -o "$RELEASE_DIR/$output" ./cmd/server
+  chmod +x "$RELEASE_DIR/$output"
 done
 
-git tag "$BUNDLE_TAG"
-git push origin main
-git push origin "$BUNDLE_TAG"
+pushd "$RELEASE_DIR" >/dev/null
+sha256sum mmwx-backend-linux-amd64 mmwx-backend-linux-arm64 > checksums.txt
+popd >/dev/null
 
-gh release create "$BUNDLE_TAG" \
+git tag "$TAG"
+git push origin main
+git push origin "$TAG"
+
+gh release create "$TAG" \
   --repo "$FORK_REPOSITORY" \
-  --title "$BUNDLE_TAG" \
-  --notes "Fork installer bundle. Backend assets are verified copies of the official ${UPSTREAM_REPOSITORY} ${UPSTREAM_TAG} Release. Custom UI and Custom API are downloaded separately from ImoLR/mmwx-custom." \
-  "$TEMP_DIR/mmwx-linux-amd64" \
-  "$TEMP_DIR/mmwx-linux-arm64" \
-  "$TEMP_DIR/checksums.txt"
+  --title "$TAG" \
+  --generate-notes \
+  --notes "Fork Backend release built from ImoLR/miaomiaowuX source. Custom UI and Custom API are delivered only by ImoLR/mmwx-custom." \
+  "$RELEASE_DIR/mmwx-backend-linux-amd64" \
+  "$RELEASE_DIR/mmwx-backend-linux-arm64" \
+  "$RELEASE_DIR/checksums.txt"

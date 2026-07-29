@@ -1,6 +1,6 @@
 name: Publish to R2 CDN
 
-# 发版后把面板二进制 + version.json 推到 Cloudflare R2,供面板自更新走 CDN(绕开 api.github.com 限流)。
+# 发版后把 Fork Backend 二进制 + version.json 推到 Cloudflare R2。
 # 触发:GitHub Release 发布时(assets 已由 build.yml 上传完毕)。
 # 需要的 Secrets(仓库 Settings → Secrets and variables → Actions):
 #   R2_ACCOUNT_ID        Cloudflare 账号 ID
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '手动补传的 release tag(如 v0.3.7)'
+        description: '手动补传的 release tag(如 v0.3.8-fork.1)'
         required: true
 
 permissions:
@@ -22,15 +22,15 @@ permissions:
 
 jobs:
   publish:
-    name: Push panel binaries + version.json to R2
+    name: Push Fork Backend binaries + version.json to R2
     runs-on: ubuntu-latest
     env:
       TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
       NOTES: ${{ github.event.release.body }}
       URL: ${{ github.event.release.html_url }}
-      PROJECT: miaomiaowux
+      PROJECT: miaomiaowux-fork
     steps:
-      - name: Download release assets (mmwx-*) — 等 build.yml 传完再下,避免竞态
+      - name: Download release assets (mmwx-backend-*) — 等 build.yml 传完再下,避免竞态
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -38,7 +38,7 @@ jobs:
           # publish-cdn 与 build.yml 都由 release:published 触发,本步可能抢在 build.yml 上传二进制
           # 之前跑 → "no assets to download" 直接失败(R2 一片空)。这里重试等待资产出现(最多 ~10min)。
           for i in $(seq 1 40); do
-            if gh release download "$TAG" --repo "${{ github.repository }}" --pattern 'mmwx-*' --dir dist 2>/dev/null; then
+            if gh release download "$TAG" --repo "${{ github.repository }}" --pattern 'mmwx-backend-*' --dir dist 2>/dev/null; then
               echo "第 $i 次尝试:资产已下载"
               break
             fi
@@ -46,8 +46,8 @@ jobs:
             sleep 15
           done
           ls -la dist
-          if ! ls dist/mmwx-* >/dev/null 2>&1; then
-            echo "::error::等待超时:release $TAG 仍无 mmwx-* 资产(build.yml 可能失败或资产命名变了)"
+          if ! ls dist/mmwx-backend-* >/dev/null 2>&1; then
+            echo "::error::等待超时:release $TAG 仍无 mmwx-backend-* 资产(build.yml 可能失败或资产命名变了)"
             exit 1
           fi
 
@@ -81,7 +81,7 @@ jobs:
           BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           # 二进制:长缓存(内容随版本名变,可安全长缓存)
-          for f in dist/mmwx-*; do
+          for f in dist/mmwx-backend-*; do
             [ -f "$f" ] || continue
             name=$(basename "$f")
             aws s3 cp "$f" "s3://$BUCKET/$PROJECT/$name" \

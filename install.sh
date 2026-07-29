@@ -2,7 +2,7 @@
 # miaomiaowuX Fork development-stack installer.
 #
 # It installs two independently released components:
-#   1. the official-style mmwx backend from this Fork's GitHub Release;
+#   1. the Fork Backend from this Fork's GitHub Release;
 #   2. the Custom UI and Custom API from ImoLR/mmwx-custom's GitHub Release.
 
 set -euo pipefail
@@ -19,11 +19,9 @@ BACKEND_BINARY="$INSTALL_DIR/$BACKEND_SERVICE"
 CUSTOM_BINARY="$INSTALL_DIR/$CUSTOM_SERVICE"
 BACKEND_UNIT="/etc/systemd/system/$BACKEND_SERVICE.service"
 CUSTOM_UNIT="/etc/systemd/system/$CUSTOM_SERVICE.service"
-LEGACY_CUSTOM_SERVICE="mmwx-custom-api"
 
 TEMP_DIR=""
 BACKUP_DIR=""
-LEGACY_CUSTOM_WAS_ACTIVE=0
 
 info() { printf '[INFO] %s\n' "$*"; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -95,7 +93,7 @@ download_releases() {
   TEMP_DIR="$(mktemp -d)"
   FORK_TAG="${FORK_VERSION:-$(latest_release_tag "$FORK_RELEASE_REPO")}"
   CUSTOM_TAG="${CUSTOM_VERSION:-$(latest_release_tag "$CUSTOM_RELEASE_REPO")}"
-  BACKEND_ASSET="mmwx-linux-$ARCH"
+  BACKEND_ASSET="mmwx-backend-linux-$ARCH"
   CUSTOM_ASSET="mmwx-custom-linux-$ARCH.tar.gz"
 
   info "下载 Fork Release: $FORK_TAG"
@@ -210,16 +208,9 @@ restore_current_installation() {
     rm -rf "$APP_DIR/frontend"
     mv "$BACKUP_DIR/frontend" "$APP_DIR/frontend"
   fi
-  if [ "$LEGACY_CUSTOM_WAS_ACTIVE" -eq 1 ]; then
-    systemctl restart "$LEGACY_CUSTOM_SERVICE.service" || true
-  fi
 }
 
 stop_stack() {
-  if systemctl is-active --quiet "$LEGACY_CUSTOM_SERVICE.service" 2>/dev/null; then
-    LEGACY_CUSTOM_WAS_ACTIVE=1
-    systemctl stop "$LEGACY_CUSTOM_SERVICE.service"
-  fi
   systemctl stop "$CUSTOM_SERVICE.service" 2>/dev/null || true
   systemctl stop "$BACKEND_SERVICE.service" 2>/dev/null || true
 }
@@ -264,11 +255,6 @@ install_or_update() {
     restore_current_installation
     start_stack || true
     die "新版本启动失败，已恢复原版本。"
-  fi
-
-  if [ "$LEGACY_CUSTOM_WAS_ACTIVE" -eq 1 ]; then
-    systemctl disable "$LEGACY_CUSTOM_SERVICE.service" >/dev/null 2>&1 || true
-    info "已将旧服务 $LEGACY_CUSTOM_SERVICE.service 迁移到 $CUSTOM_SERVICE.service"
   fi
 
   printf '%s\n' "$FORK_TAG" > "$DATA_DIR/fork-version"

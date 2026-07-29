@@ -2,21 +2,33 @@ package web
 
 import (
 	"bytes"
-	"embed"
 	"io/fs"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"sync"
 	"time"
 )
 
-//go:embed dist/*
-var embeddedFiles embed.FS
-
 // themePlaceholder 是 index.html 内联脚本里的默认主题占位符,serveIndex 时替换成管理员设置的值。
 // 无 cookie 的用户首屏据此决定初始主题(flat / pixel),避免像素↔扁平的加载闪烁。
 const themePlaceholder = "__MMW_DEFAULT_THEME__"
+
+const backendOnlyIndex = `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>miaomiaowuX Fork Backend</title>
+</head>
+<body>
+  <main style="font-family:system-ui,sans-serif;max-width:720px;margin:10vh auto;padding:24px;line-height:1.6">
+    <h1>miaomiaowuX Fork Backend</h1>
+    <p>This release provides backend APIs only. The Custom UI is served by mmwx-custom.</p>
+  </main>
+</body>
+</html>`
 
 var (
 	initOnce    sync.Once
@@ -45,26 +57,20 @@ func SetDefaultTheme(theme string) {
 }
 
 func initialize() {
-	sub, err := fs.Sub(embeddedFiles, "dist")
-	if err != nil {
-		panic(err)
-	}
+	staticFS = os.DirFS("internal/web/dist")
+	staticFiles = http.FileServer(http.FS(staticFS))
 
-	staticFS = sub
-	staticFiles = http.FileServer(http.FS(sub))
-
-	indexBytes, err = fs.ReadFile(sub, "index.html")
-	if err != nil {
-		panic(err)
+	if content, err := fs.ReadFile(staticFS, "index.html"); err == nil {
+		indexBytes = content
+		if info, err := fs.Stat(staticFS, "index.html"); err == nil {
+			indexMod = info.ModTime()
+		}
+	} else {
+		indexBytes = []byte(backendOnlyIndex)
+		indexMod = time.Now()
 	}
 	// 默认先按 pixel 替换占位符;main.go 启动后会用 DB 里的值再 SetDefaultTheme 一次。
 	servedIndex = bytes.ReplaceAll(indexBytes, []byte(themePlaceholder), []byte(currentTheme))
-
-	if info, err := fs.Stat(sub, "index.html"); err == nil {
-		indexMod = info.ModTime()
-	} else {
-		indexMod = time.Now()
-	}
 }
 
 // 返回一个为嵌入式前端 SPA 提供服务的 HTTP 处理程序。

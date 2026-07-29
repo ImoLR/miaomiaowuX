@@ -1,49 +1,18 @@
-name: Build and Release
+name: Build Fork Backend
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*-fork.*'
   workflow_dispatch:
 
 jobs:
-  lint-and-test:
-    name: Lint and Test
+  test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      # 前端源码在独立私有 repo,用 FRONTEND_PAT (fine-grained PAT,只读私有前端 repo) checkout 到本地。
-      # ref: 用同名 tag/branch,跟后端版本严格对齐。FRONTEND_REPO 形如 owner/repo-name。
-      # 用 vars.FRONTEND_REPO 把 repo 全名外移,避免硬编码 + 方便 fork 改名后不动 workflow。
-      - name: Checkout private frontend
-        uses: actions/checkout@v4
-        with:
-          repository: iluobei/miaomiaowux-frontend
-          token: ${{ secrets.FRONTEND_PAT }}
-          path: miaomiaowux-frontend
-          ref: ${{ github.ref_name }}
-
-      - name: Verify frontend checkout
-        # 用 verify step 把模糊的"setup-node 找不到 lock file"翻译成具体诊断:
-        # 多半是 vars/secrets 没配,或私有前端 repo 没打同名 tag。
-        run: |
-          if [ ! -f miaomiaowux-frontend/package.json ] || [ ! -f miaomiaowux-frontend/package-lock.json ]; then
-            echo "::error::私有前端 checkout 失败 — miaomiaowux-frontend/ 缺 package.json 或 package-lock.json"
-            echo ""
-            echo "排查清单:"
-            echo "  1. 公开 repo Settings → Secrets and variables → Actions:"
-            echo "     - Secret: FRONTEND_PAT = 私有前端 repo (iluobei/miaomiaowux-frontend) 的 fine-grained PAT (Contents: Read)"
-            echo "  2. 私有前端 repo 是否打了同名 tag '${{ github.ref_name }}'?"
-            echo "     若没有: 在前端 repo cd 进去,git tag ${{ github.ref_name }} && git push origin ${{ github.ref_name }}"
-            echo "  3. FRONTEND_PAT 是否过期?"
-            echo ""
-            echo "miaomiaowux-frontend/ 实际内容:"
-            ls -la miaomiaowux-frontend/ 2>&1 || echo "  (目录不存在或为空)"
-            exit 1
-          fi
-          echo "✓ 私有前端 checkout 成功 (有 package.json + package-lock.json)"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -51,95 +20,27 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: miaomiaowux-frontend/package-lock.json
-
-      - name: Go mod verify
-        run: go mod verify
-
-      - name: Go mod download
-        run: go mod download
-
-      - name: Install frontend dependencies
-        run: |
-          cd miaomiaowux-frontend
-          npm ci
-
-      - name: Run frontend lint
-        continue-on-error: true
-        run: |
-          cd miaomiaowux-frontend
-          npm run lint
-
-      - name: Run frontend format check
-        continue-on-error: true
-        run: |
-          cd miaomiaowux-frontend
-          npm run format:check
-
-      - name: Run knip (unused code check)
-        continue-on-error: true
-        run: |
-          cd miaomiaowux-frontend
-          npm run knip
+      - name: Go test
+        run: go test ./...
 
   build:
-    name: Build Binaries
-    needs: lint-and-test
+    name: Build Backend Binaries
+    needs: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
           - goos: linux
             goarch: amd64
-            output: mmwx-linux-amd64
+            output: mmwx-backend-linux-amd64
           - goos: linux
             goarch: arm64
-            output: mmwx-linux-arm64
-          - goos: darwin
-            goarch: amd64
-            output: mmwx-darwin-amd64
-          - goos: darwin
-            goarch: arm64
-            output: mmwx-darwin-arm64
-          - goos: windows
-            goarch: amd64
-            output: mmwx-windows-amd64.exe
+            output: mmwx-backend-linux-arm64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Checkout private frontend
-        uses: actions/checkout@v4
-        with:
-          repository: iluobei/miaomiaowux-frontend
-          token: ${{ secrets.FRONTEND_PAT }}
-          path: miaomiaowux-frontend
-          ref: ${{ github.ref_name }}
-
-      - name: Verify frontend checkout
-        # 用 verify step 把模糊的"setup-node 找不到 lock file"翻译成具体诊断:
-        # 多半是 vars/secrets 没配,或私有前端 repo 没打同名 tag。
-        run: |
-          if [ ! -f miaomiaowux-frontend/package.json ] || [ ! -f miaomiaowux-frontend/package-lock.json ]; then
-            echo "::error::私有前端 checkout 失败 — miaomiaowux-frontend/ 缺 package.json 或 package-lock.json"
-            echo ""
-            echo "排查清单:"
-            echo "  1. 公开 repo Settings → Secrets and variables → Actions:"
-            echo "     - Secret: FRONTEND_PAT = 私有前端 repo (iluobei/miaomiaowux-frontend) 的 fine-grained PAT (Contents: Read)"
-            echo "  2. 私有前端 repo 是否打了同名 tag '${{ github.ref_name }}'?"
-            echo "     若没有: 在前端 repo cd 进去,git tag ${{ github.ref_name }} && git push origin ${{ github.ref_name }}"
-            echo "  3. FRONTEND_PAT 是否过期?"
-            echo ""
-            echo "miaomiaowux-frontend/ 实际内容:"
-            ls -la miaomiaowux-frontend/ 2>&1 || echo "  (目录不存在或为空)"
-            exit 1
-          fi
-          echo "✓ 私有前端 checkout 成功 (有 package.json + package-lock.json)"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -147,27 +48,7 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: miaomiaowux-frontend/package-lock.json
-
-      - name: Install frontend dependencies
-        run: |
-          cd miaomiaowux-frontend
-          npm ci
-
-      - name: Build frontend
-        run: |
-          cd miaomiaowux-frontend
-          npm run build
-
-      - name: Build backend
-        # LICENSE_PUB_KEY: 通过 -ldflags -X 注入 internal/license.licenseSignPubKeyB64,
-        # 源码默认空字符串 → fork 后自编译的二进制验签全部失败 → PRO 不可用。
-        # Secret 在 仓库 Settings → Secrets and variables → Actions 配置。
+      - name: Build Fork Backend
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -175,94 +56,18 @@ jobs:
           LICENSE_PUB_KEY: ${{ secrets.LICENSE_PUB_KEY }}
         run: |
           if [ -z "$LICENSE_PUB_KEY" ]; then
-            echo "::warning::LICENSE_PUB_KEY secret is empty — built binary will reject all license responses (PRO unusable)"
+            echo "::warning::LICENSE_PUB_KEY secret is empty — built binary may reject PRO license responses"
           fi
           go build -trimpath \
             -ldflags="-s -w -X 'miaomiaowux/internal/license.licenseSignPubKeyB64=${LICENSE_PUB_KEY}'" \
             -o build/${{ matrix.output }} ./cmd/server
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.output }}
           path: build/${{ matrix.output }}
           retention-days: 7
-
-  docker:
-    name: Build and Push Docker Image
-    needs: lint-and-test
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Checkout private frontend
-        uses: actions/checkout@v4
-        with:
-          repository: iluobei/miaomiaowux-frontend
-          token: ${{ secrets.FRONTEND_PAT }}
-          path: miaomiaowux-frontend
-          ref: ${{ github.ref_name }}
-
-      - name: Verify frontend checkout
-        # 用 verify step 把模糊的"setup-node 找不到 lock file"翻译成具体诊断:
-        # 多半是 vars/secrets 没配,或私有前端 repo 没打同名 tag。
-        run: |
-          if [ ! -f miaomiaowux-frontend/package.json ] || [ ! -f miaomiaowux-frontend/package-lock.json ]; then
-            echo "::error::私有前端 checkout 失败 — miaomiaowux-frontend/ 缺 package.json 或 package-lock.json"
-            echo ""
-            echo "排查清单:"
-            echo "  1. 公开 repo Settings → Secrets and variables → Actions:"
-            echo "     - Secret: FRONTEND_PAT = 私有前端 repo (iluobei/miaomiaowux-frontend) 的 fine-grained PAT (Contents: Read)"
-            echo "  2. 私有前端 repo 是否打了同名 tag '${{ github.ref_name }}'?"
-            echo "     若没有: 在前端 repo cd 进去,git tag ${{ github.ref_name }} && git push origin ${{ github.ref_name }}"
-            echo "  3. FRONTEND_PAT 是否过期?"
-            echo ""
-            echo "miaomiaowux-frontend/ 实际内容:"
-            ls -la miaomiaowux-frontend/ 2>&1 || echo "  (目录不存在或为空)"
-            exit 1
-          fi
-          echo "✓ 私有前端 checkout 成功 (有 package.json + package-lock.json)"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            LICENSE_PUB_KEY=${{ secrets.LICENSE_PUB_KEY }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   release:
     name: Create Release
@@ -272,54 +77,27 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Download Linux AMD64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: mmwx-linux-amd64
+          name: mmwx-backend-linux-amd64
           path: release
 
       - name: Download Linux ARM64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: mmwx-linux-arm64
-          path: release
-
-      - name: Download Darwin AMD64 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: mmwx-darwin-amd64
-          path: release
-
-      - name: Download Darwin ARM64 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: mmwx-darwin-arm64
-          path: release
-
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: mmwx-windows-amd64.exe
+          name: mmwx-backend-linux-arm64
           path: release
 
       - name: Add executable permissions
         run: |
-          chmod +x release/mmwx-linux-amd64
-          chmod +x release/mmwx-linux-arm64
-          chmod +x release/mmwx-darwin-amd64
-          chmod +x release/mmwx-darwin-arm64
+          chmod +x release/mmwx-backend-linux-amd64
+          chmod +x release/mmwx-backend-linux-arm64
 
       - name: Create checksums
         run: |
           cd release
-          sha256sum mmwx-linux-amd64 > checksums.txt
-          sha256sum mmwx-linux-arm64 >> checksums.txt
-          sha256sum mmwx-darwin-amd64 >> checksums.txt
-          sha256sum mmwx-darwin-arm64 >> checksums.txt
-          sha256sum mmwx-windows-amd64.exe >> checksums.txt
+          sha256sum mmwx-backend-linux-amd64 mmwx-backend-linux-arm64 > checksums.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -328,11 +106,8 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: |
-            release/mmwx-linux-amd64
-            release/mmwx-linux-arm64
-            release/mmwx-darwin-amd64
-            release/mmwx-darwin-arm64
-            release/mmwx-windows-amd64.exe
+            release/mmwx-backend-linux-amd64
+            release/mmwx-backend-linux-arm64
             release/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
