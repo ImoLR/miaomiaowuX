@@ -86,7 +86,7 @@ exit "$status"
 ```bash
 tmp_script="$(mktemp)"
 curl -fsSL https://raw.githubusercontent.com/ImoLR/miaomiaowuX/main/update.sh -o "$tmp_script"
-sudo FORK_VERSION=v0.3.8-fork.3 CUSTOM_VERSION=v1.0.3 bash "$tmp_script"
+sudo FORK_VERSION=v0.3.8-fork.4 CUSTOM_VERSION=v1.0.3 bash "$tmp_script"
 status=$?
 rm -f "$tmp_script"
 exit "$status"

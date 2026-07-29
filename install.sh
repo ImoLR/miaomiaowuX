@@ -258,6 +258,8 @@ backup_current_installation() {
   mkdir -p "$BACKUP_DIR"
   [ ! -f "$BACKEND_BINARY" ] || cp -a "$BACKEND_BINARY" "$BACKUP_DIR/backend"
   [ ! -f "$CUSTOM_BINARY" ] || cp -a "$CUSTOM_BINARY" "$BACKUP_DIR/custom"
+  [ ! -f "$BACKEND_UNIT" ] || cp -a "$BACKEND_UNIT" "$BACKUP_DIR/backend.service"
+  [ ! -f "$CUSTOM_UNIT" ] || cp -a "$CUSTOM_UNIT" "$BACKUP_DIR/custom.service"
   [ ! -d "$APP_DIR/frontend" ] || mv "$APP_DIR/frontend" "$BACKUP_DIR/frontend"
 }
 
@@ -285,6 +287,17 @@ restore_current_installation() {
     rm -rf "$APP_DIR/frontend"
     mv "$BACKUP_DIR/frontend" "$APP_DIR/frontend"
   fi
+  if [ -f "$BACKUP_DIR/backend.service" ]; then
+    cp -a "$BACKUP_DIR/backend.service" "$BACKEND_UNIT"
+  else
+    rm -f "$BACKEND_UNIT"
+  fi
+  if [ -f "$BACKUP_DIR/custom.service" ]; then
+    cp -a "$BACKUP_DIR/custom.service" "$CUSTOM_UNIT"
+  else
+    rm -f "$CUSTOM_UNIT"
+  fi
+  systemctl daemon-reload
 }
 
 stop_stack() {
@@ -325,8 +338,11 @@ wait_for_url() {
 
 install_or_update() {
   local mode="$1"
-  if [ "$mode" = "update" ] && [ ! -f "$BACKEND_BINARY" ]; then
+  if [ "$mode" = "update" ] && [ ! -f "$BACKEND_BINARY" ] && [ ! -f "$CUSTOM_BINARY" ] && [ ! -f "$CUSTOM_UNIT" ]; then
     die "未检测到已安装的开发栈，请先运行 install.sh。"
+  fi
+  if [ "$mode" = "update" ] && [ ! -f "$BACKEND_BINARY" ] && { [ -f "$CUSTOM_BINARY" ] || [ -f "$CUSTOM_UNIT" ]; }; then
+    info "检测到旧单服务部署，执行双服务迁移..."
   fi
 
   require_root
